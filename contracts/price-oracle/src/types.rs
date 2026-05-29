@@ -65,6 +65,14 @@ pub enum DataKey {
     ///
     /// Used by `clear_assets` and snapshot tests that reference `DataKey::Price`.
     Price(Symbol),
+    /// Rollback slot for per-asset price bounds — written before every bounds update.
+    PrevPriceBoundsEntry(Symbol),
+    /// Rollback slot for the global max deviation percentage — written before every update.
+    PrevMaxDeviationBps,
+    /// Rollback slot for per-asset price floor — written before every floor update.
+    PrevPriceFloorEntry(Symbol),
+    /// Minimum number of votes required for a governance action to reach quorum.
+    MinQuorumThreshold,
 }
 
 /// Decimal metadata for an asset pair.

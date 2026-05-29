@@ -10,6 +10,7 @@ members = [
     "contracts/hello-world",
     "contracts/ledger-time-helper",
     "contracts/price-oracle",
+    "contracts/reward-splitter",
 ]
 resolver = "2"
 
