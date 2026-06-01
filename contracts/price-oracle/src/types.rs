@@ -145,6 +145,26 @@ pub struct AssetInfo {
     pub quote_decimals: u32,
 }
 
+/// Configuration for atomic asset registration and initialization.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssetRegistrationConfig {
+    /// Asset symbol for this registration.
+    pub asset: Symbol,
+    /// Short human-readable asset name.
+    pub name: Symbol,
+    /// Native decimal precision of the base asset.
+    pub base_decimals: u32,
+    /// Native decimal precision of the quote asset.
+    pub quote_decimals: u32,
+    /// Minimum allowed price for the asset pair.
+    pub min_price: i128,
+    /// Maximum allowed price for the asset pair.
+    pub max_price: i128,
+    /// Optional absolute floor price for the asset.
+    pub price_floor: Option<i128>,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssetWeight {

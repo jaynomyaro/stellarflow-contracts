@@ -288,6 +288,75 @@ fn test_set_and_get_price_bounds() {
 }
 
 #[test]
+fn test_register_assets_with_config_applies_all_config_atomically() {
+    let (env, contract_id, client) = setup();
+    let admin = Address::generate(&env);
+    let asset = symbol_short!("NGN");
+
+    set_admin(&env, &contract_id, &admin);
+
+    let config = AssetRegistrationConfig {
+        asset: asset.clone(),
+        name: Symbol::new(&env, "Nigerian Naira"),
+        base_decimals: 7,
+        quote_decimals: 2,
+        min_price: 500_i128,
+        max_price: 2_000_i128,
+        price_floor: Some(600_i128),
+    };
+
+    client
+        .register_assets_with_config(&admin, &vec![&env, config], &500_i128)
+        .unwrap();
+
+    let info = client.get_asset_info(&asset).unwrap();
+    assert_eq!(info.name, Symbol::new(&env, "Nigerian Naira"));
+    assert_eq!(info.base_decimals, 7);
+    assert_eq!(info.quote_decimals, 2);
+
+    let meta = client.get_asset_meta(&asset).unwrap();
+    assert_eq!(meta.base_decimals, 7);
+    assert_eq!(meta.quote_decimals, 2);
+
+    let bounds = client.get_price_bounds(&asset).unwrap();
+    assert_eq!(bounds.min_price, 500_i128);
+    assert_eq!(bounds.max_price, 2_000_i128);
+    assert_eq!(client.get_max_deviation_percentage(), 500_i128);
+    assert_eq!(client.get_price_floor(&asset), Some(600_i128));
+}
+
+#[test]
+fn test_register_assets_with_config_rolls_back_on_invalid_config() {
+    let (env, contract_id, client) = setup();
+    let admin = Address::generate(&env);
+    let asset = symbol_short!("NGN");
+
+    set_admin(&env, &contract_id, &admin);
+
+    let bad_config = AssetRegistrationConfig {
+        asset: asset.clone(),
+        name: Symbol::new(&env, "Nigerian Naira"),
+        base_decimals: 7,
+        quote_decimals: 2,
+        min_price: 2_500_i128,
+        max_price: 2_000_i128,
+        price_floor: Some(600_i128),
+    };
+
+    let result = client.try_register_assets_with_config(&admin, &vec![&env, bad_config], &500_i128);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, Error::InvalidPriceBounds),
+        other => panic!("expected InvalidPriceBounds, got {:?}", other),
+    }
+
+    assert!(client.get_asset_info(&asset).is_none());
+    assert!(client.get_asset_meta(&asset).is_none());
+    assert!(client.get_price_bounds(&asset).is_none());
+    assert_eq!(client.get_price_floor(&asset), None);
+    assert_eq!(client.get_max_deviation_percentage(), 1_000_i128);
+}
+
+#[test]
 fn test_update_price_rejects_price_outside_bounds() {
     let (env, contract_id, client) = setup();
     let admin = Address::generate(&env);

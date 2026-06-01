@@ -9,9 +9,9 @@ use soroban_sdk::{
 };
 
 use crate::types::{
-    AdminAction, AdminLogEntry, AssetInfo, AssetMeta, DataKey, PriceBounds, PriceBuffer,
-    PriceBufferEntry, PriceData, PriceDataWithStatus, PriceEntryWithStatus, PriceUpdatePayload,
-    ProposedAction, RecentEvent,
+    AdminAction, AdminLogEntry, AssetInfo, AssetMeta, AssetRegistrationConfig, DataKey,
+    PriceBounds, PriceBuffer, PriceBufferEntry, PriceData, PriceDataWithStatus,
+    PriceEntryWithStatus, PriceUpdatePayload, ProposedAction, RecentEvent,
 };
 const ADMIN_TIMELOCK: u64 = 86_400;
 const MAX_CLEAR_ASSETS: u32 = 20;
@@ -37,6 +37,18 @@ pub trait StellarFlowTrait {
         base_decimals: u32,
         quote_decimals: u32,
     );
+
+    /// Register one or more new assets and configure them atomically.
+    ///
+    /// This combines asset tracking, decimal configuration, and safety threshold
+    /// setup into a single atomic transaction, ensuring no partial state is left
+    /// behind if any config validation fails.
+    fn register_assets_with_config(
+        env: Env,
+        admin: Address,
+        configs: soroban_sdk::Vec<crate::types::AssetRegistrationConfig>,
+        max_deviation_bps: i128,
+    ) -> Result<(), ContractError>;
 
     /// Get lightweight metadata for an asset.
     fn get_asset_info(env: Env, asset: Symbol) -> Option<crate::types::AssetInfo>;
@@ -446,22 +458,50 @@ pub enum ContractError {
     NoPreviousConfig = 23,
     /// Contract has not been initialized yet.
     NotInitialized = 24,
-    /// Rate data is stale or expired.
-    StaleRateData = 26,
     /// Contract is emergency halted — all rate read queries are blocked.
     EmergencyHalted = 25,
+    /// Rate data is stale or expired.
+    StaleRateData = 26,
     /// Slash amount string is missing, malformed, or is not a positive integer.
-    InvalidSlashAmount = 26,
+    InvalidSlashAmount = 27,
     /// No SEP-41 token has been configured for slashing operations.
-    SlashTokenNotSet = 27,
+    SlashTokenNotSet = 28,
     /// No insurance reserve address has been configured.
-    InsuranceReserveNotSet = 28,
+    InsuranceReserveNotSet = 29,
     /// A slash amount exceeded the relayer's available stake.
-    InsufficientStake = 29,
+    InsufficientStake = 30,
     /// Missed-block infraction counts must be positive and in range.
-    InvalidInfractionCount = 30,
+    InvalidInfractionCount = 31,
     /// A new price write is not allowed until the ledger advances past the previous write.
-    DuplicatePriceWriteInSameLedger = 31,
+    DuplicatePriceWriteInSameLedger = 32,
+    /// Admin has not been set on the contract.
+    AdminNotSet = 33,
+    /// The pending admin action could not be found.
+    PendingAdminNotFound = 34,
+    /// The specified address is not the pending admin.
+    NotPendingAdmin = 35,
+    /// The pending admin transfer timestamp was not found.
+    PendingAdminTimestampMissing = 36,
+    /// The admin timelock has not yet expired.
+    AdminTimelockNotExpired = 37,
+    /// A provider is not authorized to submit prices.
+    ProviderNotAuthorized = 38,
+    /// Current action requires the council address.
+    CouncilRequired = 39,
+    /// Contract is frozen and cannot execute state changes.
+    ContractFrozen = 40,
+    /// Too many assets were supplied in a batch operation.
+    TooManyAssets = 41,
+    /// A configured absolute price floor is invalid.
+    InvalidPriceFloor = 42,
+    /// A normalized price failed validation.
+    InvalidNormalizedPrice = 43,
+    /// Asset configuration provided to atomic registration is invalid.
+    InvalidAssetConfig = 44,
+    /// Maximum deviation percentage failed validation.
+    InvalidMaxDeviation = 45,
+    /// Asset price bounds failed validation.
+    InvalidPriceBounds = 46,
 }
 
 #[contract]
@@ -1116,6 +1156,120 @@ impl PriceOracle {
         env.storage()
             .persistent()
             .set(&DataKey::AssetInfo(asset), &info);
+    }
+
+    /// Register one or more new assets and configure them atomically.
+    ///
+    /// This combines asset tracking, decimal configuration, and safety threshold
+    /// setup into a single atomic transaction, ensuring no partial state is left
+    /// behind if any config validation fails.
+    pub fn register_assets_with_config(
+        env: Env,
+        admin: Address,
+        configs: soroban_sdk::Vec<AssetRegistrationConfig>,
+        max_deviation_bps: i128,
+    ) -> Result<(), ContractError> {
+        _require_not_destroyed(&env);
+        _require_initialized(&env);
+        crate::auth::_require_not_frozen(&env);
+        admin.require_auth();
+        crate::auth::_require_authorized(&env, &admin);
+
+        if configs.len() == 0 {
+            return Err(ContractError::InvalidAssetConfig);
+        }
+
+        if max_deviation_bps <= 0 || max_deviation_bps > 10_000 {
+            return Err(ContractError::InvalidMaxDeviation);
+        }
+
+        for config in configs.iter() {
+            if config.min_price <= 0
+                || config.max_price <= 0
+                || config.min_price > config.max_price
+            {
+                return Err(ContractError::InvalidPriceBounds);
+            }
+            if let Some(price_floor) = config.price_floor {
+                if price_floor <= 0 || price_floor > config.max_price {
+                    return Err(ContractError::InvalidPriceBounds);
+                }
+            }
+        }
+
+        if let Some(existing) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, i128>(&DataKey::MaxPriceDeviationBps)
+        {
+            env.storage()
+                .persistent()
+                .set(&DataKey::PrevMaxDeviationBps, &existing);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::MaxPriceDeviationBps, &max_deviation_bps);
+
+        for config in configs.iter() {
+            let asset = config.asset.clone();
+            _track_asset(&env, asset.clone());
+
+            let key = DataKey::VerifiedPrice(asset.clone());
+            if env
+                .storage()
+                .persistent()
+                .get::<DataKey, PriceData>(&key)
+                .is_none()
+            {
+                env.storage().persistent().set(
+                    &key,
+                    &PriceData {
+                        price: 0,
+                        timestamp: env.ledger().timestamp(),
+                        ledger_sequence: env.ledger().sequence().into(),
+                        provider: env.current_contract_address(),
+                        decimals: 0,
+                        confidence_score: 0,
+                        ttl: 0,
+                    },
+                );
+            }
+
+            env.storage().persistent().set(
+                &DataKey::AssetMeta(asset.clone()),
+                &AssetMeta {
+                    base_decimals: config.base_decimals,
+                    quote_decimals: config.quote_decimals,
+                },
+            );
+            env.storage()
+                .persistent()
+                .set(
+                    &DataKey::AssetInfo(asset.clone()),
+                    &AssetInfo {
+                        name: config.name.clone(),
+                        base_decimals: config.base_decimals,
+                        quote_decimals: config.quote_decimals,
+                    },
+                );
+            env.storage().persistent().set(
+                &DataKey::PriceBoundsEntry(asset.clone()),
+                &PriceBounds {
+                    min_price: config.min_price,
+                    max_price: config.max_price,
+                },
+            );
+            if let Some(price_floor) = config.price_floor {
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::PriceFloorEntry(asset.clone()), &price_floor);
+            }
+
+            env.events().publish((Symbol::new(&env, "asset_added_event"),), (asset.clone(),));
+            log_event(&env, Symbol::new(&env, "asset_added"), asset, 0);
+        }
+
+        Ok(())
     }
 
     /// Get lightweight metadata for an asset.
