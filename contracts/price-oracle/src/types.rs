@@ -86,6 +86,12 @@ pub enum DataKey {
     SlashToken,
     /// The address of the insurance reserve that receives slashed funds.
     InsuranceReserve,
+    /// The SEP-41 token contract address used for query fee collection.
+    FeeToken,
+    /// The aggregated rolling balance of incoming usage fee tokens.
+    FeeVaultBalance,
+    /// The pending reward balance for a relayer/validator.
+    ProviderRewardBalance(Address),
 
     // ── Issue #264: per-admin signature weight ────────────────────────────────
     /// Governance weight assigned to a specific admin (u32, 0–100).

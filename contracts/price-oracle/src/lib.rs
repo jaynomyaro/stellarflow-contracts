@@ -354,6 +354,27 @@ pub trait StellarFlowTrait {
     /// Get the configured insurance reserve address, if any.
     fn get_insurance_reserve(env: Env) -> Option<Address>;
 
+    /// Configure the SEP-41 token contract used for query fee collection.
+    fn set_fee_token(env: Env, admin: Address, token: Address) -> Result<(), ContractError>;
+
+    /// Get the configured fee token address, if any.
+    fn get_fee_token(env: Env) -> Option<Address>;
+
+    /// Set the query fee amount for `get_price` calls (in token stroops).
+    fn set_query_fee(env: Env, admin: Address, fee: i128) -> Result<(), ContractError>;
+
+    /// Get the configured query fee amount.
+    fn get_query_fee(env: Env) -> i128;
+
+    /// Get the current accumulated fee vault balance.
+    fn get_fee_vault_balance(env: Env) -> i128;
+
+    /// Get the current pending rewards balance for a validator.
+    fn get_provider_reward_balance(env: Env, validator: Address) -> i128;
+
+    /// Claim all pending rewards for a validator from the centralized fee vault.
+    fn claim_rewards(env: Env, validator: Address) -> Result<i128, ContractError>;
+
     /// Deposit stake tokens into the contract on behalf of a relayer.
     ///
     /// Tokens are transferred from the relayer's wallet into the contract's
@@ -473,6 +494,14 @@ pub enum ContractError {
     SlashTokenNotSet = 28,
     /// No insurance reserve address has been configured.
     InsuranceReserveNotSet = 29,
+    /// No query fee token has been configured for usage fee collection.
+    FeeTokenNotSet = 48,
+    /// No pending rewards are available for the caller to claim.
+    NoRewards = 49,
+    /// Query fee amount must be zero or positive.
+    InvalidQueryFee = 50,
+    /// The fee vault does not contain enough tokens to satisfy a claim.
+    InsufficientVaultBalance = 51,
     /// A slash amount exceeded the relayer's available stake.
     InsufficientStake = 30,
     /// Missed-block infraction counts must be positive and in range.
@@ -1404,10 +1433,157 @@ impl PriceOracle {
                 if is_stale(now, price_data.timestamp, price_data.ttl) {
                     return Err(ContractError::AssetNotFound);
                 }
+                Self::process_query_fee(&env, &price_data.provider)?;
                 Ok(price_data)
             }
             None => Err(ContractError::AssetNotFound),
         }
+    }
+
+    fn process_query_fee(env: &Env, provider: &Address) -> Result<(), ContractError> {
+        let fee: i128 = env.storage().persistent().get(&DataKey::QueryFee).unwrap_or(0);
+        if fee <= 0 {
+            return Ok(());
+        }
+
+        let token_address: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FeeToken)
+            .ok_or(ContractError::FeeTokenNotSet)?;
+
+        let payer = env.invoker();
+        let token_client = token::Client::new(env, &token_address);
+        token_client.transfer(&payer, &env.current_contract_address(), &fee);
+
+        let provider_reward_key = DataKey::ProviderRewardBalance(provider.clone());
+        let current_provider_rewards: i128 = env.storage().persistent().get(&provider_reward_key).unwrap_or(0);
+        let new_provider_rewards = current_provider_rewards
+            .checked_add(fee)
+            .ok_or(ContractError::PriceMathOverflow)?;
+        env.storage()
+            .persistent()
+            .set(&provider_reward_key, &new_provider_rewards);
+
+        let current_vault: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FeeVaultBalance)
+            .unwrap_or(0);
+        let new_vault = current_vault
+            .checked_add(fee)
+            .ok_or(ContractError::PriceMathOverflow)?;
+        env.storage().persistent().set(&DataKey::FeeVaultBalance, &new_vault);
+
+        Ok(())
+    }
+
+    /// Configure the SEP-41 token contract used for query fee collection.
+    pub fn set_fee_token(env: Env, admin: Address, token: Address) -> Result<(), ContractError> {
+        _require_not_destroyed(&env);
+        _require_initialized(&env);
+        crate::auth::_require_not_frozen(&env);
+        admin.require_auth();
+        crate::auth::_require_authorized(&env, &admin);
+
+        env.storage().persistent().set(&DataKey::FeeToken, &token);
+
+        env.events().publish(
+            (Symbol::new(&env, "fee_token_set"),),
+            (admin, token),
+        );
+
+        Ok(())
+    }
+
+    /// Get the configured fee token address, if any.
+    pub fn get_fee_token(env: Env) -> Option<Address> {
+        env.storage().persistent().get(&DataKey::FeeToken)
+    }
+
+    /// Set the query fee amount for get_price calls.
+    pub fn set_query_fee(env: Env, admin: Address, fee: i128) -> Result<(), ContractError> {
+        _require_not_destroyed(&env);
+        _require_initialized(&env);
+        crate::auth::_require_not_frozen(&env);
+        admin.require_auth();
+        crate::auth::_require_authorized(&env, &admin);
+
+        if fee < 0 {
+            return Err(ContractError::InvalidQueryFee);
+        }
+
+        env.storage().persistent().set(&DataKey::QueryFee, &fee);
+        env.events().publish(
+            (Symbol::new(&env, "query_fee_set"),),
+            (admin, fee),
+        );
+        Ok(())
+    }
+
+    /// Get the configured query fee amount.
+    pub fn get_query_fee(env: Env) -> i128 {
+        env.storage().persistent().get(&DataKey::QueryFee).unwrap_or(0)
+    }
+
+    /// Get the current accumulated fee vault balance.
+    pub fn get_fee_vault_balance(env: Env) -> i128 {
+        env.storage().persistent().get(&DataKey::FeeVaultBalance).unwrap_or(0)
+    }
+
+    /// Get the current pending rewards balance for a validator.
+    pub fn get_provider_reward_balance(env: Env, validator: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ProviderRewardBalance(validator))
+            .unwrap_or(0)
+    }
+
+    /// Claim all pending rewards for a validator from the centralized fee vault.
+    pub fn claim_rewards(env: Env, validator: Address) -> Result<i128, ContractError> {
+        validator.require_auth();
+
+        let pending_rewards_key = DataKey::ProviderRewardBalance(validator.clone());
+        let pending_rewards: i128 = env
+            .storage()
+            .persistent()
+            .get(&pending_rewards_key)
+            .unwrap_or(0);
+
+        if pending_rewards <= 0 {
+            return Err(ContractError::NoRewards);
+        }
+
+        let token_address: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FeeToken)
+            .ok_or(ContractError::FeeTokenNotSet)?;
+
+        let current_vault: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FeeVaultBalance)
+            .unwrap_or(0);
+        if current_vault < pending_rewards {
+            return Err(ContractError::InsufficientVaultBalance);
+        }
+
+        let new_vault = current_vault - pending_rewards;
+        env.storage()
+            .persistent()
+            .set(&DataKey::FeeVaultBalance, &new_vault);
+        env.storage().persistent().remove(&pending_rewards_key);
+
+        let token_client = token::Client::new(&env, &token_address);
+        token_client.transfer(&env.current_contract_address(), &validator, &pending_rewards);
+
+        env.events().publish(
+            (Symbol::new(&env, "rewards_claimed_event"),),
+            (validator.clone(), pending_rewards),
+        );
+
+        Ok(pending_rewards)
     }
 
     /// Returns the last known price data and marks it stale when TTL has expired.
