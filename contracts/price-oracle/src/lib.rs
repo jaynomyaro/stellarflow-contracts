@@ -507,6 +507,8 @@ pub enum ContractError {
     InvalidMaxDeviation = 45,
     /// Asset price bounds failed validation.
     InvalidPriceBounds = 46,
+    /// Arithmetic operation overflow detected.
+    PriceMathOverflow = 47,
 }
 
 #[contract]
@@ -1031,7 +1033,7 @@ impl PriceOracle {
 
         // Calculate final index price.
         // Because all stored prices are 9-decimal normalized, the division preserves the 9-decimal standard.
-        let index_price = total_weighted_price / (total_weight as i128);
+        let index_price = total_weighted_price.checked_div(total_weight as i128).ok_or(ContractError::PriceMathOverflow)?;
         Ok(index_price)
     }
 
@@ -3317,10 +3319,10 @@ impl PriceOracle {
 
         let mut sum: i128 = 0;
         for (_, price) in twap_buffer.iter() {
-            sum += price;
+            sum = sum.checked_add(price)?;
         }
 
-        Some(sum / (len as i128))
+        sum.checked_div(len as i128)
     }
 
     /// Subscribe a contract to receive price update callbacks.
