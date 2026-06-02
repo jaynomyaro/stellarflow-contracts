@@ -98,6 +98,43 @@ use crate::Error;
 //     String::from_bytes(env, &out[..pos])
 // }
 
+/// Calculate the absolute deviation between a submitted price and the consensus
+/// median, expressed in basis points (bps).
+///
+/// Formula: `|submitted - consensus| * 10_000 / consensus`
+///
+/// Both values must already be normalized to the same decimal precision before
+/// calling. Use [`normalize_to_nine`] if the inputs have different native precisions.
+///
+/// # Errors
+/// - `Error::DeviationConsensusZero` — when `consensus` is zero (divide-by-zero guard).
+/// - `Error::PriceMathOverflow` — on arithmetic overflow.
+///
+/// # Examples
+/// ```text
+/// calculate_deviation_bps(10_100, 10_000) => Ok(100)   // 1 % = 100 bps
+/// calculate_deviation_bps(10_000, 10_000) => Ok(0)     // identical prices
+/// calculate_deviation_bps(500, 0)         => Err(DeviationConsensusZero)
+/// ```
+pub fn calculate_deviation_bps(submitted: i128, consensus: i128) -> Result<u32, Error> {
+    if consensus == 0 {
+        return Err(Error::DeviationConsensusZero);
+    }
+    let diff = if submitted >= consensus {
+        submitted - consensus
+    } else {
+        consensus - submitted
+    };
+    // diff * 10_000 / consensus — use saturating mul so extreme submissions
+    // (e.g. i128::MAX) don't panic; they saturate to u32::MAX which maps to
+    // the highest DeviationTier (Manipulation).
+    let bps = match diff.checked_mul(10_000) {
+        Some(v) => v.checked_div(consensus).ok_or(Error::PriceMathOverflow)?,
+        None => i128::MAX,
+    };
+    Ok(bps.min(u32::MAX as i128) as u32)
+}
+
 pub fn normalize_to_seven(value: i128, input_decimals: u32) -> Result<i128, Error> {
     if input_decimals < 7 {
         let diff = 7 - input_decimals;
@@ -195,53 +232,88 @@ mod tests {
     use soroban_sdk::Env;
 
     // --- format_price tests ---------------------------------------------------
+    // NOTE: commented out because format_price itself is commented out pending
+    // a decision on whether to re-enable the formatted string output feature.
+
+    // #[test]
+    // fn test_format_price_normal() {
+    //     let env = Env::default();
+    //     // 75050 with 2 decimals → "750.50"
+    //     let s = format_price(&env, 75050, 2);
+    //     assert_eq!(s.to_string(), "750.50");
+    // }
+
+    // #[test]
+    // fn test_format_price_small_value() {
+    //     let env = Env::default();
+    //     // 50 with 3 decimals → "0.050"
+    //     let s = format_price(&env, 50, 3);
+    //     assert_eq!(s.to_string(), "0.050");
+    // }
+
+    // #[test]
+    // fn test_format_price_no_decimals() {
+    //     let env = Env::default();
+    //     // 12345 with 0 decimals → "12345"
+    //     let s = format_price(&env, 12345, 0);
+    //     assert_eq!(s.to_string(), "12345");
+    // }
+
+    // #[test]
+    // fn test_format_price_zero() {
+    //     let env = Env::default();
+    //     // 0 with 2 decimals → "0.00"
+    //     let s = format_price(&env, 0, 2);
+    //     assert_eq!(s.to_string(), "0.00");
+    // }
+
+    // #[test]
+    // fn test_format_price_exact_decimal_boundary() {
+    //     let env = Env::default();
+    //     // 1 with 1 decimal → "0.1"
+    //     let s = format_price(&env, 1, 1);
+    //     assert_eq!(s.to_string(), "0.1");
+    // }
+
+    // #[test]
+    // fn test_format_price_negative() {
+    //     let env = Env::default();
+    //     // -75050 with 2 decimals → "-750.50"
+    //     let s = format_price(&env, -75050, 2);
+    //     assert_eq!(s.to_string(), "-750.50");
+    // }
+
+    // --- calculate_deviation_bps tests ----------------------------------------
 
     #[test]
-    fn test_format_price_normal() {
-        let env = Env::default();
-        // 75050 with 2 decimals → "750.50"
-        let s = format_price(&env, 75050, 2);
-        assert_eq!(s.to_string(), "750.50");
+    fn test_deviation_bps_identical() {
+        assert_eq!(calculate_deviation_bps(10_000, 10_000), Ok(0));
     }
 
     #[test]
-    fn test_format_price_small_value() {
-        let env = Env::default();
-        // 50 with 3 decimals → "0.050"
-        let s = format_price(&env, 50, 3);
-        assert_eq!(s.to_string(), "0.050");
+    fn test_deviation_bps_above_consensus() {
+        // 10_100 vs 10_000 → 100 bps (1 %)
+        assert_eq!(calculate_deviation_bps(10_100, 10_000), Ok(100));
     }
 
     #[test]
-    fn test_format_price_no_decimals() {
-        let env = Env::default();
-        // 12345 with 0 decimals → "12345"
-        let s = format_price(&env, 12345, 0);
-        assert_eq!(s.to_string(), "12345");
+    fn test_deviation_bps_below_consensus() {
+        // 9_800 vs 10_000 → 200 bps (2 %)
+        assert_eq!(calculate_deviation_bps(9_800, 10_000), Ok(200));
     }
 
     #[test]
-    fn test_format_price_zero() {
-        let env = Env::default();
-        // 0 with 2 decimals → "0.00"
-        let s = format_price(&env, 0, 2);
-        assert_eq!(s.to_string(), "0.00");
+    fn test_deviation_bps_zero_consensus() {
+        assert_eq!(
+            calculate_deviation_bps(500, 0),
+            Err(Error::DeviationConsensusZero)
+        );
     }
 
     #[test]
-    fn test_format_price_exact_decimal_boundary() {
-        let env = Env::default();
-        // 1 with 1 decimal → "0.1"
-        let s = format_price(&env, 1, 1);
-        assert_eq!(s.to_string(), "0.1");
-    }
-
-    #[test]
-    fn test_format_price_negative() {
-        let env = Env::default();
-        // -75050 with 2 decimals → "-750.50"
-        let s = format_price(&env, -75050, 2);
-        assert_eq!(s.to_string(), "-750.50");
+    fn test_deviation_bps_extreme_saturates_to_u32_max() {
+        let result = calculate_deviation_bps(i128::MAX, 1);
+        assert_eq!(result, Ok(u32::MAX));
     }
 
     // --- normalize_to_seven tests ---------------------------------------------

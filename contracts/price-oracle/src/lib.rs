@@ -502,6 +502,8 @@ pub enum ContractError {
     InvalidQueryFee = 50,
     /// The fee vault does not contain enough tokens to satisfy a claim.
     InsufficientVaultBalance = 51,
+    /// Consensus price is zero; deviation cannot be calculated (divide-by-zero guard).
+    DeviationConsensusZero = 52,
     /// A slash amount exceeded the relayer's available stake.
     InsufficientStake = 30,
     /// Missed-block infraction counts must be positive and in range.

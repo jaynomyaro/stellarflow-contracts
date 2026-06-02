@@ -120,6 +120,10 @@ pub enum DataKey {
     /// The ledger sequence number when the oracle last resumed from a halt.
     /// Used to ignore tracking metrics (TWAP, RecentEvents) from before the recovery.
     BaselineLedger,
+    /// Last recorded deviation (in basis points) between a provider's submitted
+    /// price and the consensus median.  Written on every `report_price_deviation`
+    /// call for audit and off-chain indexing purposes.
+    ProviderLastDeviationBps(Address),
 }
 
 /// Decimal metadata for an asset pair.
