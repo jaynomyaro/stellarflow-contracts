@@ -102,7 +102,9 @@ pub fn normalize_to_seven(value: i128, input_decimals: u32) -> Result<i128, Erro
     if input_decimals < 7 {
         let diff = 7 - input_decimals;
         let multiplier = 10_i128.checked_pow(diff).ok_or(Error::PriceMathOverflow)?;
-        value.checked_mul(multiplier).ok_or(Error::PriceMathOverflow)
+        value
+            .checked_mul(multiplier)
+            .ok_or(Error::PriceMathOverflow)
     } else if input_decimals > 7 {
         let diff = input_decimals - 7;
         let divisor = 10_i128.checked_pow(diff).ok_or(Error::PriceMathOverflow)?;
@@ -132,7 +134,9 @@ pub fn normalize_to_nine(value: i128, native_decimals: u32) -> Result<i128, Erro
     if native_decimals < TARGET {
         let diff = TARGET - native_decimals;
         let multiplier = 10_i128.checked_pow(diff).ok_or(Error::PriceMathOverflow)?;
-        value.checked_mul(multiplier).ok_or(Error::PriceMathOverflow)
+        value
+            .checked_mul(multiplier)
+            .ok_or(Error::PriceMathOverflow)
     } else if native_decimals > TARGET {
         let diff = native_decimals - TARGET;
         let divisor = 10_i128.checked_pow(diff).ok_or(Error::PriceMathOverflow)?;

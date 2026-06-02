@@ -19,7 +19,10 @@ pub struct DummyToken;
 impl DummyToken {
     pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
         from.require_auth();
-        env.events().publish((Symbol::new(&env, "token_transfer_event"),), (from, to, amount));
+        env.events().publish(
+            (Symbol::new(&env, "token_transfer_event"),),
+            (from, to, amount),
+        );
     }
 }
 
@@ -288,6 +291,36 @@ fn test_set_and_get_price_bounds() {
 }
 
 #[test]
+fn test_set_price_bounds_emits_indexable_price_bounds_event() {
+    let (env, contract_id, client) = setup();
+    let admin = Address::generate(&env);
+    let asset = symbol_short!("NGN");
+
+    set_admin(&env, &contract_id, &admin);
+    client.set_price_bounds(&admin, &asset, &500_i128, &2_000_i128);
+
+    let events = env.events().all();
+    let debug_str = alloc::format!("{:?}", events);
+    assert!(debug_str.contains("price_bounds_set"));
+    assert!(debug_str.contains("NGN"));
+}
+
+#[test]
+fn test_set_price_floor_emits_indexable_price_floor_event() {
+    let (env, contract_id, client) = setup();
+    let admin = Address::generate(&env);
+    let asset = symbol_short!("NGN");
+
+    set_admin(&env, &contract_id, &admin);
+    client.set_price_floor(&admin, &asset, &700_i128);
+
+    let events = env.events().all();
+    let debug_str = alloc::format!("{:?}", events);
+    assert!(debug_str.contains("price_floor_set"));
+    assert!(debug_str.contains("NGN"));
+}
+
+#[test]
 fn test_update_price_rejects_price_outside_bounds() {
     let (env, contract_id, client) = setup();
     let admin = Address::generate(&env);
@@ -481,6 +514,37 @@ fn test_update_price_emits_event() {
     let events = env.events().all();
     let debug_str = alloc::format!("{:?}", events);
     assert!(debug_str.contains("price_updated_event"));
+    assert!(debug_str.contains("price_update"));
+}
+
+#[test]
+fn test_update_price_emits_indexable_price_update_topic() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+
+    let admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let provider = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let asset = symbol_short!("NGN");
+    let price: i128 = 1_500_000;
+
+    env.as_contract(&contract_id, || {
+        crate::auth::_set_admin(&env, &soroban_sdk::vec![&env, admin.clone()]);
+        crate::auth::_add_provider(&env, &provider);
+    });
+
+    client.add_asset(&admin, &asset);
+
+    env.ledger().set_timestamp(1_700_000_000);
+    env.ledger().set_sequence_number(1);
+    client.update_price(&provider, &asset, &price, &6u32, &100u32, &3600u64);
+
+    let events = env.events().all();
+    let debug_str = alloc::format!("{:?}", events);
+    assert!(debug_str.contains("price_update"));
+    assert!(debug_str.contains("NGN"));
 }
 
 #[test]
@@ -2684,7 +2748,7 @@ fn test_buffer_truncation_with_equal_weights() {
     for _ in 0..13 {
         let provider = Address::generate(&env);
         providers.push_back(provider.clone());
-        
+
         env.as_contract(&contract_id, || {
             crate::auth::_add_provider(&env, &provider);
             crate::auth::_set_provider_weight(&env, &provider, 75u32);
@@ -2705,7 +2769,7 @@ fn test_buffer_truncation_with_equal_weights() {
     // Get the buffer and verify it was truncated to 11
     let buffer = client.get_price_buffer_data(&asset);
     assert!(buffer.is_some(), "Buffer should exist");
-    
+
     let buffer_data = buffer.unwrap();
     assert_eq!(
         buffer_data.entries.len(),
@@ -2734,7 +2798,7 @@ fn test_median_calculation_after_truncation() {
     for i in 0..12 {
         let provider = Address::generate(&env);
         providers.push_back(provider.clone());
-        
+
         env.as_contract(&contract_id, || {
             crate::auth::_add_provider(&env, &provider);
             let weight = if i < 11 { 100u32 } else { 10u32 }; // Last provider has low weight
@@ -2759,7 +2823,7 @@ fn test_median_calculation_after_truncation() {
         price_data.price >= 1_000_000_i128,
         "Median price should be calculated from truncated buffer"
     );
-    
+
     // The low-weight provider (index 11) should have been excluded
     let buffer = client.get_price_buffer_data(&asset).unwrap();
     assert_eq!(buffer.entries.len(), 11, "Buffer should contain 11 entries");
@@ -3012,12 +3076,12 @@ fn test_graceful_recovery_clears_metrics() {
 
     // 1. Populate metrics: Price update (adds to TWAP, RecentEvents, LastSeen)
     client.update_price(&provider, &asset, &1000_i128, &6u32, &100u32, &3600u64);
-    
+
     // Add relayer infraction
     env.as_contract(&contract_id, || {
         crate::slashing::report_missed_blocks(&env, &provider, 5).unwrap();
     });
-    
+
     assert_eq!(client.get_twap(&asset), Some(1000));
     assert_eq!(client.get_last_n_events(&5).len(), 1);
     assert_eq!(client.get_provider_consecutive_missed_blocks(&provider), 5);

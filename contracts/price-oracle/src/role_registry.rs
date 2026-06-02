@@ -124,14 +124,19 @@ pub fn _role_can(env: &Env, role: Role, action: &Symbol) -> bool {
 /// a role that is permitted to perform `action`. Checks all variants of
 /// `Role` and returns on the first matching grant.
 pub fn _require_can(env: &Env, account: &Address, action: &Symbol) {
-    for role in [Role::PriceUpdater, Role::BoundsAdjuster, Role::OracleManager].iter() {
+    for role in [
+        Role::PriceUpdater,
+        Role::BoundsAdjuster,
+        Role::OracleManager,
+    ]
+    .iter()
+    {
         if _has_role(env, *role, account) && _role_can(env, *role, action) {
             return;
         }
     }
     panic_with_error!(env, Error::NotAuthorized);
 }
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Tests
@@ -262,7 +267,11 @@ mod role_registry_tests {
             perms.push_back(symbol_short!("update"));
             _set_role_permissions(&env, Role::PriceUpdater, &perms);
 
-            assert!(_role_can(&env, Role::PriceUpdater, &symbol_short!("update")));
+            assert!(_role_can(
+                &env,
+                Role::PriceUpdater,
+                &symbol_short!("update")
+            ));
         });
     }
 
@@ -274,7 +283,11 @@ mod role_registry_tests {
             perms.push_back(symbol_short!("update"));
             _set_role_permissions(&env, Role::PriceUpdater, &perms);
 
-            assert!(!_role_can(&env, Role::PriceUpdater, &symbol_short!("revoke")));
+            assert!(!_role_can(
+                &env,
+                Role::PriceUpdater,
+                &symbol_short!("revoke")
+            ));
         });
     }
 

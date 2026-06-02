@@ -60,9 +60,10 @@ pub fn get_consecutive_missed_blocks(env: &Env, relayer: &Address) -> u32 {
 
 /// Overwrite the missed-block counter for a relayer.
 fn set_consecutive_missed_blocks(env: &Env, relayer: &Address, count: u32) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::ProviderConsecutiveMissedBlocks(relayer.clone()), &count);
+    env.storage().persistent().set(
+        &DataKey::ProviderConsecutiveMissedBlocks(relayer.clone()),
+        &count,
+    );
 }
 
 /// Remove the missed-block counter for a relayer.
@@ -105,7 +106,9 @@ fn calculate_exponential_multiplier(count: u32) -> Result<i128, Error> {
     if exponent >= 126 {
         return Ok(i128::MAX);
     }
-    Ok(1_i128.checked_shl(exponent).ok_or(Error::InvalidInfractionCount)?)
+    Ok(1_i128
+        .checked_shl(exponent)
+        .ok_or(Error::InvalidInfractionCount)?)
 }
 
 /// Get the effective slashing multiplier for the relayer.
@@ -293,7 +296,15 @@ pub fn execute_slash_internal(
     }
 
     // ── Emit event ───────────────────────────────────────────────────────────
-    env.events().publish((Symbol::new(env, "slash_executed_event"),), (bad_relayer.clone(), amount, reserve.clone(), executor.clone()));
+    env.events().publish(
+        (Symbol::new(env, "slash_executed_event"),),
+        (
+            bad_relayer.clone(),
+            amount,
+            reserve.clone(),
+            executor.clone(),
+        ),
+    );
 
     // Also publish a plain tuple event for off-chain indexers that don't parse
     // the typed event schema.

@@ -1,4 +1,4 @@
-use soroban_sdk::{Address, Env, Symbol, Vec, IntoVal};
+use soroban_sdk::{Address, Env, IntoVal, Symbol, Vec};
 
 use crate::types::{DataKey, PriceUpdatePayload};
 
@@ -105,7 +105,11 @@ pub fn notify_subscribers(env: &Env, payload: &PriceUpdatePayload) {
 ///
 /// This uses dynamic invocation to call the standardized callback interface.
 /// The callback contract must implement the `on_price_update(payload: PriceUpdatePayload)` function.
-fn try_invoke_callback(env: &Env, callback_contract: &Address, payload: &PriceUpdatePayload) -> Result<(), crate::ContractError> {
+fn try_invoke_callback(
+    env: &Env,
+    callback_contract: &Address,
+    payload: &PriceUpdatePayload,
+) -> Result<(), crate::ContractError> {
     env.invoke_contract::<()>(
         callback_contract,
         &Symbol::new(env, "on_price_update"),
