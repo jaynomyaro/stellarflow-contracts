@@ -431,6 +431,15 @@ const VOLATILITY_THRESHOLD_BPS: i128 = 500;
 /// Absolute floor for governance quorum configuration.
 const MIN_SAFE_QUORUM_THRESHOLD: u32 = 2;
 
+/// Minimum remaining TTL (in ledgers) for a relayer node profile before an
+/// automatic extension is triggered during `get_price` queries.
+const PROVIDER_TTL_EXTENSION_THRESHOLD: u32 = 5_000;
+
+/// Target TTL (in ledgers from current ledger) to extend a relayer profile to
+/// when its remaining TTL drops below `PROVIDER_TTL_EXTENSION_THRESHOLD`.
+/// ~30 days at ~5 s/ledger ≈ 518_400 ledgers; using a conservative 100_000.
+const PROVIDER_TTL_EXTENSION_TARGET: u32 = 100_000;
+
 /// ContractError types for the price oracle contract
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -948,6 +957,23 @@ fn read_price_floor(env: &Env, asset: &Symbol) -> Option<i128> {
         .get(&DataKey::PriceFloorEntry(asset.clone()))
 }
 
+/// Extend the persistent storage TTL of a relayer node's profile entries if
+/// the remaining TTL has fallen below [`PROVIDER_TTL_EXTENSION_THRESHOLD`].
+///
+/// Called automatically from the `get_price` query path so that active
+/// relayers never lose their on-chain state due to rent-based eviction.
+fn _extend_provider_ttl_if_needed(env: &Env, provider: &Address) {
+    let storage = env.storage().persistent();
+    let stake_key = DataKey::ProviderStake(provider.clone());
+    let last_seen_key = DataKey::ProviderLastSeenLedger(provider.clone());
+    if storage.has(&stake_key) {
+        storage.extend_ttl(&stake_key, PROVIDER_TTL_EXTENSION_THRESHOLD, PROVIDER_TTL_EXTENSION_TARGET);
+    }
+    if storage.has(&last_seen_key) {
+        storage.extend_ttl(&last_seen_key, PROVIDER_TTL_EXTENSION_THRESHOLD, PROVIDER_TTL_EXTENSION_TARGET);
+    }
+}
+
 fn enforce_price_floor(env: &Env, asset: &Symbol, price: i128) -> Result<(), ContractError> {
     if let Some(price_floor) = read_price_floor(env, asset) {
         if price < price_floor {
@@ -1434,6 +1460,8 @@ impl PriceOracle {
                     return Err(ContractError::AssetNotFound);
                 }
                 Self::process_query_fee(&env, &price_data.provider)?;
+                // Issue #364: auto-extend relayer node profile TTL when below threshold.
+                _extend_provider_ttl_if_needed(&env, &price_data.provider);
                 Ok(price_data)
             }
             None => Err(ContractError::AssetNotFound),
