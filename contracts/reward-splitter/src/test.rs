@@ -348,3 +348,216 @@ fn test_reset_parameters_unauthorized() {
 
     client.reset_parameters(&unauthorized);
 }
+
+#[test]
+fn test_propose_action() {
+    let env = Env::default();
+    let contract_id = env.register(RewardSplitter, ());
+    let client = RewardSplitterClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    client.initialize(&admin, &token);
+
+    let action_id = client.propose_action(
+        &admin,
+        &CooldownActionType::ResetParameters,
+        &String::from_str(&env, "test"),
+    );
+
+    let action = client.get_action(&action_id).unwrap();
+    assert_eq!(action.current_stage, 1);
+    assert_eq!(action.executed, false);
+    assert_eq!(action.cancelled, false);
+}
+
+#[test]
+#[should_panic(expected = "Error(Unauthorized)")]
+fn test_propose_action_unauthorized() {
+    let env = Env::default();
+    let contract_id = env.register(RewardSplitter, ());
+    let client = RewardSplitterClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let unauthorized = Address::generate(&env);
+
+    client.initialize(&admin, &token);
+
+    client.propose_action(
+        &unauthorized,
+        &CooldownActionType::ResetParameters,
+        &String::from_str(&env, "test"),
+    );
+}
+
+#[test]
+fn test_advance_action() {
+    let env = Env::default();
+    let contract_id = env.register(RewardSplitter, ());
+    let client = RewardSplitterClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    client.initialize(&admin, &token);
+
+    let action_id = client.propose_action(
+        &admin,
+        &CooldownActionType::ResetParameters,
+        &String::from_str(&env, "test"),
+    );
+
+    // Advance time past stage 1 cooldown
+    env.ledger().set_timestamp(env.ledger().timestamp() + 4000);
+
+    client.advance_action(&admin, &action_id);
+
+    let action = client.get_action(&action_id).unwrap();
+    assert_eq!(action.current_stage, 2);
+}
+
+#[test]
+#[should_panic(expected = "Error(CooldownNotExpired)")]
+fn test_advance_action_too_soon() {
+    let env = Env::default();
+    let contract_id = env.register(RewardSplitter, ());
+    let client = RewardSplitterClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    client.initialize(&admin, &token);
+
+    let action_id = client.propose_action(
+        &admin,
+        &CooldownActionType::ResetParameters,
+        &String::from_str(&env, "test"),
+    );
+
+    // Try to advance without waiting
+    client.advance_action(&admin, &action_id);
+}
+
+#[test]
+fn test_execute_action() {
+    let env = Env::default();
+    let contract_id = env.register(RewardSplitter, ());
+    let client = RewardSplitterClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    client.initialize(&admin, &token);
+    client.add_recipient(&admin, &recipient, &10000);
+
+    let action_id = client.propose_action(
+        &admin,
+        &CooldownActionType::ResetParameters,
+        &String::from_str(&env, "test"),
+    );
+
+    // Advance through all stages
+    env.ledger().set_timestamp(env.ledger().timestamp() + 4000);
+    client.advance_action(&admin, &action_id);
+
+    env.ledger().set_timestamp(env.ledger().timestamp() + 29000);
+    client.advance_action(&admin, &action_id);
+
+    env.ledger().set_timestamp(env.ledger().timestamp() + 87000);
+    client.advance_action(&admin, &action_id);
+
+    client.execute_action(&admin, &action_id);
+
+    let action = client.get_action(&action_id).unwrap();
+    assert_eq!(action.executed, true);
+    assert_eq!(client.get_total_shares(), 0);
+}
+
+#[test]
+fn test_cancel_action() {
+    let env = Env::default();
+    let contract_id = env.register(RewardSplitter, ());
+    let client = RewardSplitterClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    client.initialize(&admin, &token);
+
+    let action_id = client.propose_action(
+        &admin,
+        &CooldownActionType::ResetParameters,
+        &String::from_str(&env, "test"),
+    );
+
+    client.cancel_action(&admin, &action_id);
+
+    let action = client.get_action(&action_id).unwrap();
+    assert_eq!(action.cancelled, true);
+}
+
+#[test]
+fn test_get_cooldown_remaining() {
+    let env = Env::default();
+    let contract_id = env.register(RewardSplitter, ());
+    let client = RewardSplitterClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    client.initialize(&admin, &token);
+
+    let action_id = client.propose_action(
+        &admin,
+        &CooldownActionType::ResetParameters,
+        &String::from_str(&env, "test"),
+    );
+
+    let remaining = client.get_cooldown_remaining(&action_id).unwrap();
+    assert!(remaining > 0);
+}
+
+#[test]
+fn test_configure_cooldown_stage() {
+    let env = Env::default();
+    let contract_id = env.register(RewardSplitter, ());
+    let client = RewardSplitterClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    client.initialize(&admin, &token);
+
+    client.configure_cooldown_stage(
+        &admin,
+        &1,
+        &7200,
+        &String::from_str(&env, "Custom stage 1"),
+    );
+
+    let stage = client.get_cooldown_stage(&1).unwrap();
+    assert_eq!(stage.cooldown_seconds, 7200);
+}
+
+#[test]
+#[should_panic(expected = "Error(InvalidStage)")]
+fn test_configure_cooldown_stage_invalid() {
+    let env = Env::default();
+    let contract_id = env.register(RewardSplitter, ());
+    let client = RewardSplitterClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    client.initialize(&admin, &token);
+
+    client.configure_cooldown_stage(
+        &admin,
+        &5,
+        &7200,
+        &String::from_str(&env, "Invalid stage"),
+    );
+}

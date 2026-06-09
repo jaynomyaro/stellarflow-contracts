@@ -4,8 +4,8 @@ extern crate alloc;
 use alloc::format;
 
 use soroban_sdk::{
-    contract, contractclient, contracterror, contractimpl, panic_with_error, token,
-    Address, Env, String, Symbol,
+    contract, contractclient, contracterror, contractimpl, panic_with_error, token, Address, Env,
+    String, Symbol,
 };
 
 use crate::types::{
@@ -13,6 +13,7 @@ use crate::types::{
     PriceBounds, PriceBuffer, PriceBufferEntry, PriceData, PriceDataWithStatus,
     PriceEntryWithStatus, PriceUpdatePayload, ProposedAction, RecentEvent,
 };
+mod event_topics;
 const ADMIN_TIMELOCK: u64 = 86_400;
 const MAX_CLEAR_ASSETS: u32 = 20;
 
@@ -72,7 +73,8 @@ pub trait StellarFlowTrait {
     /// Get the full price data with freshness status for a specific asset.
     ///
     /// Returns the last known price with `is_stale = true` when the price has expired.
-    fn get_price_with_status(env: Env, asset: Symbol) -> Result<PriceDataWithStatus, ContractError>;
+    fn get_price_with_status(env: Env, asset: Symbol)
+        -> Result<PriceDataWithStatus, ContractError>;
 
     /// Get the price data for a specific asset, or `None` if not found.
     ///
@@ -227,7 +229,11 @@ pub trait StellarFlowTrait {
     fn get_delegate(env: Env, admin: Address) -> Option<Address>;
 
     /// Execute a proposed action that has reached the vote threshold.
-    fn execute_proposed_action(env: Env, executor: Address, action_id: u64) -> Result<(), ContractError>;
+    fn execute_proposed_action(
+        env: Env,
+        executor: Address,
+        action_id: u64,
+    ) -> Result<(), ContractError>;
 
     /// Get the details of a proposed action.
     fn get_proposed_action(env: Env, action_id: u64) -> Option<ProposedAction>;
@@ -239,7 +245,11 @@ pub trait StellarFlowTrait {
     fn get_required_threshold(env: Env) -> u32;
 
     /// Cancel a proposed action.
-    fn cancel_proposed_action(env: Env, canceller: Address, action_id: u64) -> Result<(), ContractError>;
+    fn cancel_proposed_action(
+        env: Env,
+        canceller: Address,
+        action_id: u64,
+    ) -> Result<(), ContractError>;
 
     /// Set the governance weight for a specific admin (issue #264).
     ///
@@ -272,7 +282,10 @@ pub trait StellarFlowTrait {
     ///
     /// # Returns
     /// Returns an error if the contract is already subscribed.
-    fn subscribe_to_price_updates(env: Env, callback_contract: Address) -> Result<(), ContractError>;
+    fn subscribe_to_price_updates(
+        env: Env,
+        callback_contract: Address,
+    ) -> Result<(), ContractError>;
 
     /// Unsubscribe a contract from price update callbacks.
     ///
@@ -281,7 +294,10 @@ pub trait StellarFlowTrait {
     ///
     /// # Returns
     /// Returns an error if the contract is not found in the subscriber list.
-    fn unsubscribe_from_price_updates(env: Env, callback_contract: Address) -> Result<(), ContractError>;
+    fn unsubscribe_from_price_updates(
+        env: Env,
+        callback_contract: Address,
+    ) -> Result<(), ContractError>;
 
     /// Get the list of all contracts subscribed to price updates.
     ///
@@ -319,7 +335,12 @@ pub trait StellarFlowTrait {
     /// When `status` is `true`, every public rate read (get_price, get_last_price,
     /// get_prices, get_price_with_status, get_price_safe, get_twap, get_index_price)
     /// will panic with `ContractError::EmergencyHalted` until the halt is lifted.
-    fn set_emergency_halt(env: Env, admin1: Address, admin2: Address, status: bool) -> Result<(), ContractError>;
+    fn set_emergency_halt(
+        env: Env,
+        admin1: Address,
+        admin2: Address,
+        status: bool,
+    ) -> Result<(), ContractError>;
 
     /// Return the current emergency halt state.
     fn is_halted(env: Env) -> bool;
@@ -349,10 +370,35 @@ pub trait StellarFlowTrait {
     fn get_slash_token(env: Env) -> Option<Address>;
 
     /// Configure the ecosystem insurance reserve address that receives slashed funds.
-    fn set_insurance_reserve(env: Env, admin: Address, reserve: Address) -> Result<(), ContractError>;
+    fn set_insurance_reserve(
+        env: Env,
+        admin: Address,
+        reserve: Address,
+    ) -> Result<(), ContractError>;
 
     /// Get the configured insurance reserve address, if any.
     fn get_insurance_reserve(env: Env) -> Option<Address>;
+
+    /// Configure the SEP-41 token contract used for query fee collection.
+    fn set_fee_token(env: Env, admin: Address, token: Address) -> Result<(), ContractError>;
+
+    /// Get the configured fee token address, if any.
+    fn get_fee_token(env: Env) -> Option<Address>;
+
+    /// Set the query fee amount for `get_price` calls (in token stroops).
+    fn set_query_fee(env: Env, admin: Address, fee: i128) -> Result<(), ContractError>;
+
+    /// Get the configured query fee amount.
+    fn get_query_fee(env: Env) -> i128;
+
+    /// Get the current accumulated fee vault balance.
+    fn get_fee_vault_balance(env: Env) -> i128;
+
+    /// Get the current pending rewards balance for a validator.
+    fn get_provider_reward_balance(env: Env, validator: Address) -> i128;
+
+    /// Claim all pending rewards for a validator from the centralized fee vault.
+    fn claim_rewards(env: Env, validator: Address) -> Result<i128, ContractError>;
 
     /// Deposit stake tokens into the contract on behalf of a relayer.
     ///
@@ -391,6 +437,9 @@ pub trait TokenContractTrait {
 /// Default maximum allowed percentage change between price updates (10% = 1000 basis points).
 /// This value is used when no configurable max deviation percentage has been set.
 const MAX_PERCENT_CHANGE_BPS: i128 = 1_000;
+/// Absolute floor for the configurable max deviation window.
+/// Governance may tighten the window only down to this baseline.
+const MIN_SAFE_MAX_DEVIATION_BPS: i128 = 100;
 
 /// Maximum age (in seconds) for a rate map entry before consumer reads are rejected.
 ///
@@ -404,6 +453,17 @@ pub const MAX_RATE_AGE_SECONDS: u64 = 300;
 /// volatility event is published so downstream contracts (e.g. liquidation bots)
 /// can react without polling.
 const VOLATILITY_THRESHOLD_BPS: i128 = 500;
+/// Absolute floor for governance quorum configuration.
+const MIN_SAFE_QUORUM_THRESHOLD: u32 = 2;
+
+/// Minimum remaining TTL (in ledgers) for a relayer node profile before an
+/// automatic extension is triggered during `get_price` queries.
+const PROVIDER_TTL_EXTENSION_THRESHOLD: u32 = 5_000;
+
+/// Target TTL (in ledgers from current ledger) to extend a relayer profile to
+/// when its remaining TTL drops below `PROVIDER_TTL_EXTENSION_THRESHOLD`.
+/// ~30 days at ~5 s/ledger ≈ 518_400 ledgers; using a conservative 100_000.
+const PROVIDER_TTL_EXTENSION_TARGET: u32 = 100_000;
 
 /// ContractError types for the price oracle contract
 #[contracterror]
@@ -468,6 +528,16 @@ pub enum ContractError {
     SlashTokenNotSet = 28,
     /// No insurance reserve address has been configured.
     InsuranceReserveNotSet = 29,
+    /// No query fee token has been configured for usage fee collection.
+    FeeTokenNotSet = 48,
+    /// No pending rewards are available for the caller to claim.
+    NoRewards = 49,
+    /// Query fee amount must be zero or positive.
+    InvalidQueryFee = 50,
+    /// The fee vault does not contain enough tokens to satisfy a claim.
+    InsufficientVaultBalance = 51,
+    /// Consensus price is zero; deviation cannot be calculated (divide-by-zero guard).
+    DeviationConsensusZero = 52,
     /// A slash amount exceeded the relayer's available stake.
     InsufficientStake = 30,
     /// Missed-block infraction counts must be positive and in range.
@@ -502,6 +572,10 @@ pub enum ContractError {
     InvalidMaxDeviation = 45,
     /// Asset price bounds failed validation.
     InvalidPriceBounds = 46,
+    /// Arithmetic operation overflow detected.
+    PriceMathOverflow = 47,
+    /// Ledger gap too small - node must wait at least 3 blocks between submissions.
+    LedgerGapTooSmall = 53,
 }
 
 #[contract]
@@ -773,7 +847,7 @@ fn require_ledger_sequence_advanced(env: &Env, previous: Option<&PriceData>) -> 
 /// providers submit prices simultaneously.
 fn truncate_buffer_by_weight(env: &Env, buffer: &mut PriceBuffer) {
     let entry_count = buffer.entries.len();
-    
+
     // No truncation needed if we're under the limit
     if entry_count <= MAX_MEDIAN_ENTRIES {
         return;
@@ -912,6 +986,61 @@ fn read_price_floor(env: &Env, asset: &Symbol) -> Option<i128> {
         .get(&DataKey::PriceFloorEntry(asset.clone()))
 }
 
+/// Enforce the 3-block minimum ledger gap between provider submissions.
+/// 
+/// Prevents high-frequency automated scripts from flooding the network with
+/// consecutive price updates within the same or nearby ledger windows.
+/// 
+/// # Arguments
+/// * `env` - The Soroban environment
+/// * `provider` - The address of the provider attempting to submit
+/// 
+/// # Returns
+/// * `Ok(())` if the provider is allowed to submit (3+ blocks since last submission)
+/// * `Err(ContractError::LedgerGapTooSmall)` if the gap is less than 3 blocks
+fn enforce_ledger_gap(env: &Env, provider: &Address) -> Result<(), ContractError> {
+    const MIN_LEDGER_GAP: u32 = 3;
+    
+    let current_ledger = env.ledger().sequence();
+    let last_seen = env
+        .storage()
+        .persistent()
+        .get(&DataKey::ProviderLastSeenLedger(provider.clone()))
+        .unwrap_or(0);
+    
+    // If provider has never submitted before, allow the submission
+    if last_seen == 0 {
+        return Ok(());
+    }
+    
+    // Calculate the gap between current and last submission
+    let gap = current_ledger.saturating_sub(last_seen);
+    
+    // Reject if the gap is less than MIN_LEDGER_GAP blocks
+    if gap < MIN_LEDGER_GAP {
+        return Err(ContractError::LedgerGapTooSmall);
+    }
+    
+    Ok(())
+}
+
+/// Extend the persistent storage TTL of a relayer node's profile entries if
+/// the remaining TTL has fallen below [`PROVIDER_TTL_EXTENSION_THRESHOLD`].
+///
+/// Called automatically from the `get_price` query path so that active
+/// relayers never lose their on-chain state due to rent-based eviction.
+fn _extend_provider_ttl_if_needed(env: &Env, provider: &Address) {
+    let storage = env.storage().persistent();
+    let stake_key = DataKey::ProviderStake(provider.clone());
+    let last_seen_key = DataKey::ProviderLastSeenLedger(provider.clone());
+    if storage.has(&stake_key) {
+        storage.extend_ttl(&stake_key, PROVIDER_TTL_EXTENSION_THRESHOLD, PROVIDER_TTL_EXTENSION_TARGET);
+    }
+    if storage.has(&last_seen_key) {
+        storage.extend_ttl(&last_seen_key, PROVIDER_TTL_EXTENSION_THRESHOLD, PROVIDER_TTL_EXTENSION_TARGET);
+    }
+}
+
 fn enforce_price_floor(env: &Env, asset: &Symbol, price: i128) -> Result<(), ContractError> {
     if let Some(price_floor) = read_price_floor(env, asset) {
         if price < price_floor {
@@ -1026,7 +1155,7 @@ impl PriceOracle {
 
         // Calculate final index price.
         // Because all stored prices are 9-decimal normalized, the division preserves the 9-decimal standard.
-        let index_price = total_weighted_price / (total_weight as i128);
+        let index_price = total_weighted_price.checked_div(total_weight as i128).ok_or(ContractError::PriceMathOverflow)?;
         Ok(index_price)
     }
 
@@ -1089,7 +1218,8 @@ impl PriceOracle {
         }
 
         //_log_admin_action(&env, &admin, AdminAction::AddAsset, Some(asset.to_string()));
-        env.events().publish((Symbol::new(&env, "asset_added_event"),), (asset.clone(),));
+        env.events()
+            .publish((Symbol::new(&env, "asset_added_event"),), (asset.clone(),));
         log_event(&env, Symbol::new(&env, "asset_added"), asset, 0);
 
         Ok(())
@@ -1121,6 +1251,7 @@ impl PriceOracle {
                 quote_decimals,
             },
         );
+        event_topics::publish_asset_meta_set(&env, asset, base_decimals, quote_decimals);
     }
 
     /// Get the decimal metadata for an asset.
@@ -1156,6 +1287,7 @@ impl PriceOracle {
         env.storage()
             .persistent()
             .set(&DataKey::AssetInfo(asset), &info);
+        event_topics::publish_asset_info_set(&env, asset, info.name, base_decimals, quote_decimals);
     }
 
     /// Register one or more new assets and configure them atomically.
@@ -1325,7 +1457,9 @@ impl PriceOracle {
             .storage()
             .instance()
             .get(&DataKey::PendingAdminTimestamp)
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::PendingAdminTimestampMissing));
+            .unwrap_or_else(|| {
+                panic_with_error!(&env, ContractError::PendingAdminTimestampMissing)
+            });
 
         let now = env.ledger().timestamp();
 
@@ -1360,7 +1494,8 @@ impl PriceOracle {
         //_log_admin_action(&env, &admin, AdminAction::RenounceOwnership, None);
         crate::auth::_renounce_ownership(&env);
 
-        env.events().publish((Symbol::new(&env, "ownership_renounced_event"),), (admin,));
+        env.events()
+            .publish((Symbol::new(&env, "ownership_renounced_event"),), (admin,));
     }
 
     /// A low-gas health check to verify the contract is responding.
@@ -1397,15 +1532,167 @@ impl PriceOracle {
                 if is_stale(now, price_data.timestamp, price_data.ttl) {
                     return Err(ContractError::AssetNotFound);
                 }
+                Self::process_query_fee(&env, &price_data.provider)?;
+                // Issue #364: auto-extend relayer node profile TTL when below threshold.
+                _extend_provider_ttl_if_needed(&env, &price_data.provider);
                 Ok(price_data)
             }
             None => Err(ContractError::AssetNotFound),
         }
     }
 
+    fn process_query_fee(env: &Env, provider: &Address) -> Result<(), ContractError> {
+        let fee: i128 = env.storage().persistent().get(&DataKey::QueryFee).unwrap_or(0);
+        if fee <= 0 {
+            return Ok(());
+        }
+
+        let token_address: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FeeToken)
+            .ok_or(ContractError::FeeTokenNotSet)?;
+
+        let payer = env.invoker();
+        let token_client = token::Client::new(env, &token_address);
+        token_client.transfer(&payer, &env.current_contract_address(), &fee);
+
+        let provider_reward_key = DataKey::ProviderRewardBalance(provider.clone());
+        let current_provider_rewards: i128 = env.storage().persistent().get(&provider_reward_key).unwrap_or(0);
+        let new_provider_rewards = current_provider_rewards
+            .checked_add(fee)
+            .ok_or(ContractError::PriceMathOverflow)?;
+        env.storage()
+            .persistent()
+            .set(&provider_reward_key, &new_provider_rewards);
+
+        let current_vault: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FeeVaultBalance)
+            .unwrap_or(0);
+        let new_vault = current_vault
+            .checked_add(fee)
+            .ok_or(ContractError::PriceMathOverflow)?;
+        env.storage().persistent().set(&DataKey::FeeVaultBalance, &new_vault);
+
+        Ok(())
+    }
+
+    /// Configure the SEP-41 token contract used for query fee collection.
+    pub fn set_fee_token(env: Env, admin: Address, token: Address) -> Result<(), ContractError> {
+        _require_not_destroyed(&env);
+        _require_initialized(&env);
+        crate::auth::_require_not_frozen(&env);
+        admin.require_auth();
+        crate::auth::_require_authorized(&env, &admin);
+
+        env.storage().persistent().set(&DataKey::FeeToken, &token);
+
+        env.events().publish(
+            (Symbol::new(&env, "fee_token_set"),),
+            (admin, token),
+        );
+
+        Ok(())
+    }
+
+    /// Get the configured fee token address, if any.
+    pub fn get_fee_token(env: Env) -> Option<Address> {
+        env.storage().persistent().get(&DataKey::FeeToken)
+    }
+
+    /// Set the query fee amount for get_price calls.
+    pub fn set_query_fee(env: Env, admin: Address, fee: i128) -> Result<(), ContractError> {
+        _require_not_destroyed(&env);
+        _require_initialized(&env);
+        crate::auth::_require_not_frozen(&env);
+        admin.require_auth();
+        crate::auth::_require_authorized(&env, &admin);
+
+        if fee < 0 {
+            return Err(ContractError::InvalidQueryFee);
+        }
+
+        env.storage().persistent().set(&DataKey::QueryFee, &fee);
+        env.events().publish(
+            (Symbol::new(&env, "query_fee_set"),),
+            (admin, fee),
+        );
+        Ok(())
+    }
+
+    /// Get the configured query fee amount.
+    pub fn get_query_fee(env: Env) -> i128 {
+        env.storage().persistent().get(&DataKey::QueryFee).unwrap_or(0)
+    }
+
+    /// Get the current accumulated fee vault balance.
+    pub fn get_fee_vault_balance(env: Env) -> i128 {
+        env.storage().persistent().get(&DataKey::FeeVaultBalance).unwrap_or(0)
+    }
+
+    /// Get the current pending rewards balance for a validator.
+    pub fn get_provider_reward_balance(env: Env, validator: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ProviderRewardBalance(validator))
+            .unwrap_or(0)
+    }
+
+    /// Claim all pending rewards for a validator from the centralized fee vault.
+    pub fn claim_rewards(env: Env, validator: Address) -> Result<i128, ContractError> {
+        validator.require_auth();
+
+        let pending_rewards_key = DataKey::ProviderRewardBalance(validator.clone());
+        let pending_rewards: i128 = env
+            .storage()
+            .persistent()
+            .get(&pending_rewards_key)
+            .unwrap_or(0);
+
+        if pending_rewards <= 0 {
+            return Err(ContractError::NoRewards);
+        }
+
+        let token_address: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FeeToken)
+            .ok_or(ContractError::FeeTokenNotSet)?;
+
+        let current_vault: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FeeVaultBalance)
+            .unwrap_or(0);
+        if current_vault < pending_rewards {
+            return Err(ContractError::InsufficientVaultBalance);
+        }
+
+        let new_vault = current_vault - pending_rewards;
+        env.storage()
+            .persistent()
+            .set(&DataKey::FeeVaultBalance, &new_vault);
+        env.storage().persistent().remove(&pending_rewards_key);
+
+        let token_client = token::Client::new(&env, &token_address);
+        token_client.transfer(&env.current_contract_address(), &validator, &pending_rewards);
+
+        env.events().publish(
+            (Symbol::new(&env, "rewards_claimed_event"),),
+            (validator.clone(), pending_rewards),
+        );
+
+        Ok(pending_rewards)
+    }
+
     /// Returns the last known price data and marks it stale when TTL has expired.
     /// Always reads from the `VerifiedPrice` bucket.
-    pub fn get_price_with_status(env: Env, asset: Symbol) -> Result<PriceDataWithStatus, ContractError> {
+    pub fn get_price_with_status(
+        env: Env,
+        asset: Symbol,
+    ) -> Result<PriceDataWithStatus, ContractError> {
         if crate::auth::_is_halted(&env) {
             panic_with_error!(&env, ContractError::EmergencyHalted);
         }
@@ -1548,12 +1835,16 @@ impl PriceOracle {
         env.storage()
             .persistent()
             .set(&DataKey::AssetDescription(asset), &description);
+        event_topics::publish_asset_description_set(&env, asset, description);
     }
 
     /// Get the human-readable description for an asset.
     ///
     /// Returns `ContractError::AssetNotFound` if no description has been set.
-    pub fn get_asset_description(env: Env, asset: Symbol) -> Result<soroban_sdk::String, ContractError> {
+    pub fn get_asset_description(
+        env: Env,
+        asset: Symbol,
+    ) -> Result<soroban_sdk::String, ContractError> {
         env.storage()
             .persistent()
             .get(&DataKey::AssetDescription(asset))
@@ -1617,7 +1908,11 @@ impl PriceOracle {
                     current.ledger_sequence = current_ledger;
                     storage.set(&key, &current);
                     update_twap(&env, asset.clone(), val, now);
-                    env.events().publish((Symbol::new(&env, "price_updated_event"),), (asset.clone(), val));
+                    event_topics::publish_price_update(&env, asset.clone(), current.price, now);
+                    env.events().publish(
+                        (Symbol::new(&env, "price_updated_event"),),
+                        (asset.clone(), val),
+                    );
                     log_event(&env, Symbol::new(&env, "price_updated"), asset, val);
                     return Ok(());
                 }
@@ -1638,7 +1933,8 @@ impl PriceOracle {
             update_twap(&env, asset.clone(), normalized, now);
 
             if is_new_asset {
-                env.events().publish((Symbol::new(&env, "asset_added_event"),), (asset.clone(),));
+                env.events()
+                    .publish((Symbol::new(&env, "asset_added_event"),), (asset.clone(),));
                 log_event(
                     &env,
                     Symbol::new(&env, "asset_added"),
@@ -1646,13 +1942,17 @@ impl PriceOracle {
                     normalized,
                 );
             } else {
+                event_topics::publish_price_update(&env, asset.clone(), normalized, now);
                 log_event(
                     &env,
                     Symbol::new(&env, "price_updated"),
                     asset.clone(),
                     normalized,
                 );
-                env.events().publish((Symbol::new(&env, "price_updated_event"),), (asset.clone(), normalized));
+                env.events().publish(
+                    (Symbol::new(&env, "price_updated_event"),),
+                    (asset.clone(), normalized),
+                );
             }
 
             // Notify subscribers of the price update
@@ -1731,6 +2031,7 @@ impl PriceOracle {
             .persistent()
             .set(&DataKey::CommunityPrice(asset.clone()), &price_data);
 
+        event_topics::publish_price_update(&env, asset.clone(), normalized, now);
         log_event(
             &env,
             Symbol::new(&env, "community_price"),
@@ -1758,7 +2059,10 @@ impl PriceOracle {
         let token_client = token::Client::new(&env, &token);
         token_client.transfer(&env.current_contract_address(), &to, &amount);
 
-        env.events().publish((Symbol::new(&env, "rescue_tokens_event"),), (token, to, amount));
+        env.events().publish(
+            (Symbol::new(&env, "rescue_tokens_event"),),
+            (token, to, amount),
+        );
     }
 
     /// Upgrade the contract WASM code.
@@ -1855,7 +2159,6 @@ impl PriceOracle {
         decimals: u32,
         confidence_score: u32,
         ttl: u64,
-
     ) -> Result<(), ContractError> {
         _require_not_destroyed(&env);
         _require_initialized(&env);
@@ -1878,6 +2181,9 @@ impl PriceOracle {
             return Err(ContractError::NotAuthorized);
         }
 
+        // Enforce 3-block minimum gap between this provider's submissions
+        enforce_ledger_gap(&env, &source)?;
+
         // Normalize the raw price to 9 fixed-point decimals on entry.
         let normalized = Self::normalize_price(&env, &asset, price);
 
@@ -1899,10 +2205,7 @@ impl PriceOracle {
         let key = DataKey::VerifiedPrice(asset.clone());
         let existing_price: Option<PriceData> = storage.get(&key);
         require_ledger_sequence_advanced(&env, existing_price.as_ref())?;
-        let old_price: i128 = existing_price
-            .as_ref()
-            .map(|pd| pd.price)
-            .unwrap_or(0);
+        let old_price: i128 = existing_price.as_ref().map(|pd| pd.price).unwrap_or(0);
 
         let bypass_active = crate::auth::_is_bypass_active(&env);
 
@@ -1919,7 +2222,10 @@ impl PriceOracle {
         if old_price != 0 {
             let delta = (normalized - old_price).unsigned_abs();
             if delta > 50 {
-                env.events().publish((Symbol::new(&env, "price_anomaly_event"),), (asset.clone(), old_price, normalized, delta));
+                env.events().publish(
+                    (Symbol::new(&env, "price_anomaly_event"),),
+                    (asset.clone(), old_price, normalized, delta),
+                );
                 // Still allow the submission even if anomaly detected
             }
         }
@@ -1982,17 +2288,29 @@ impl PriceOracle {
         };
 
         // Record the provider's heartbeat (last seen ledger height) - tracking node liveness
-        storage.set(&DataKey::ProviderLastSeenLedger(source.clone()), &env.ledger().sequence());
+        storage.set(
+            &DataKey::ProviderLastSeenLedger(source.clone()),
+            &env.ledger().sequence(),
+        );
 
         storage.set(&key, &price_data);
         update_twap(&env, asset.clone(), median_price, env.ledger().timestamp());
 
-        env.events().publish((Symbol::new(&env, "price_updated_event"),), (asset.clone(), normalized));
+        event_topics::publish_price_update(
+            &env,
+            asset.clone(),
+            median_price,
+            env.ledger().timestamp(),
+        );
+        env.events().publish(
+            (Symbol::new(&env, "price_updated_event"),),
+            (asset.clone(), median_price),
+        );
         log_event(
             &env,
             Symbol::new(&env, "price_updated"),
             asset.clone(),
-            normalized,
+            median_price,
         );
 
         // Notify all subscribed contracts of the price update
@@ -2053,12 +2371,17 @@ impl PriceOracle {
         // Composite key: write directly to the per-asset slot.
         env.storage()
             .persistent()
-            .set(&DataKey::PriceFloorEntry(asset), &price_floor);
+            .set(&DataKey::PriceFloorEntry(asset.clone()), &price_floor);
+        event_topics::publish_price_floor_set(&env, asset, price_floor);
     }
 
     /// Restore the previous price floor for an asset (issue #281).
     /// Admin-only. Panics if no backup exists.
-    pub fn rollback_price_floor(env: Env, admin: Address, asset: Symbol) -> Result<(), ContractError> {
+    pub fn rollback_price_floor(
+        env: Env,
+        admin: Address,
+        asset: Symbol,
+    ) -> Result<(), ContractError> {
         _require_not_destroyed(&env);
         _require_initialized(&env);
         crate::auth::_require_not_frozen(&env);
@@ -2076,7 +2399,8 @@ impl PriceOracle {
             .set(&DataKey::PriceFloorEntry(asset.clone()), &prev);
         env.storage()
             .persistent()
-            .remove(&DataKey::PrevPriceFloorEntry(asset));
+            .remove(&DataKey::PrevPriceFloorEntry(asset.clone()));
+        event_topics::publish_price_floor_rollback(&env, asset, prev);
 
         Ok(())
     }
@@ -2122,14 +2446,22 @@ impl PriceOracle {
 
         // Composite key: write directly to the per-asset slot — no map load needed.
         env.storage().persistent().set(
-            &DataKey::PriceBoundsEntry(asset),
-            &PriceBounds { min_price, max_price },
+            &DataKey::PriceBoundsEntry(asset.clone()),
+            &PriceBounds {
+                min_price,
+                max_price,
+            },
         );
+        event_topics::publish_price_bounds_set(&env, asset, min_price, max_price);
     }
 
     /// Restore the previous price bounds for an asset (issue #281).
     /// Admin-only. Returns `ContractError::NoPreviousConfig` if no backup exists.
-    pub fn rollback_price_bounds(env: Env, admin: Address, asset: Symbol) -> Result<(), ContractError> {
+    pub fn rollback_price_bounds(
+        env: Env,
+        admin: Address,
+        asset: Symbol,
+    ) -> Result<(), ContractError> {
         _require_not_destroyed(&env);
         _require_initialized(&env);
         crate::auth::_require_not_frozen(&env);
@@ -2147,7 +2479,8 @@ impl PriceOracle {
             .set(&DataKey::PriceBoundsEntry(asset.clone()), &prev);
         env.storage()
             .persistent()
-            .remove(&DataKey::PrevPriceBoundsEntry(asset));
+            .remove(&DataKey::PrevPriceBoundsEntry(asset.clone()));
+        event_topics::publish_price_bounds_rollback(&env, asset, prev.min_price, prev.max_price);
 
         Ok(())
     }
@@ -2169,7 +2502,7 @@ impl PriceOracle {
         admin.require_auth();
         crate::auth::_require_authorized(&env, &admin);
 
-        if max_deviation_bps <= 0 || max_deviation_bps > 10_000 {
+        if max_deviation_bps < MIN_SAFE_MAX_DEVIATION_BPS || max_deviation_bps > 10_000 {
             panic_with_error!(&env, ContractError::InvalidMaxDeviation);
         }
 
@@ -2187,6 +2520,7 @@ impl PriceOracle {
         env.storage()
             .persistent()
             .set(&DataKey::MaxPriceDeviationBps, &max_deviation_bps);
+        event_topics::publish_max_deviation_pct_set(&env, max_deviation_bps);
     }
 
     /// Restore the previous max deviation percentage (issue #281).
@@ -2204,12 +2538,17 @@ impl PriceOracle {
             .get(&DataKey::PrevMaxDeviationBps)
             .ok_or(ContractError::NoPreviousConfig)?;
 
+        if prev < MIN_SAFE_MAX_DEVIATION_BPS {
+            return Err(ContractError::InvalidMaxDeviation);
+        }
+
         env.storage()
             .persistent()
             .set(&DataKey::MaxPriceDeviationBps, &prev);
         env.storage()
             .persistent()
             .remove(&DataKey::PrevMaxDeviationBps);
+        event_topics::publish_max_deviation_pct_rollback(&env, prev);
 
         Ok(())
     }
@@ -2220,6 +2559,7 @@ impl PriceOracle {
             .persistent()
             .get(&DataKey::MaxPriceDeviationBps)
             .unwrap_or(MAX_PERCENT_CHANGE_BPS)
+            .max(MIN_SAFE_MAX_DEVIATION_BPS)
     }
 
     /// Get the current ledger sequence number.
@@ -2634,6 +2974,13 @@ impl PriceOracle {
     /// The action ID that can be used to vote on this proposal
     /// Set the minimum number of votes required for a governance proposal to reach quorum (issue #292).
     /// Admin-only. Default is 1 (no floor) when unset.
+    pub fn set_min_quorum_threshold(
+        env: Env,
+        admin: Address,
+        threshold: u32,
+    ) -> Result<(), ContractError> {
+    /// Admin-only. Values below the hard floor are rejected, and the getter
+    /// clamps legacy low storage to the same minimum.
     pub fn set_min_quorum_threshold(env: Env, admin: Address, threshold: u32) -> Result<(), ContractError> {
         _require_not_destroyed(&env);
         _require_initialized(&env);
@@ -2641,7 +2988,7 @@ impl PriceOracle {
         admin.require_auth();
         crate::auth::_require_authorized(&env, &admin);
 
-        if threshold == 0 {
+        if threshold < MIN_SAFE_QUORUM_THRESHOLD {
             return Err(ContractError::MultiSigValidationFailed);
         }
 
@@ -2649,20 +2996,19 @@ impl PriceOracle {
             .persistent()
             .set(&DataKey::MinQuorumThreshold, &threshold);
 
-        env.events().publish(
-            (Symbol::new(&env, "quorum_set"),),
-            (admin, threshold),
-        );
+        env.events()
+            .publish((Symbol::new(&env, "quorum_set"),), (admin, threshold));
 
         Ok(())
     }
 
-    /// Get the configured minimum quorum threshold. Returns 1 if not set (issue #292).
+    /// Get the configured minimum quorum threshold. Returns the hard floor if unset.
     pub fn get_min_quorum_threshold(env: Env) -> u32 {
         env.storage()
             .persistent()
             .get(&DataKey::MinQuorumThreshold)
-            .unwrap_or(1)
+            .unwrap_or(MIN_SAFE_QUORUM_THRESHOLD)
+            .max(MIN_SAFE_QUORUM_THRESHOLD)
     }
 
     pub fn propose_action(
@@ -2821,7 +3167,11 @@ impl PriceOracle {
     }
 
     /// Assign a hot-wallet delegate for a cold-storage administrative identity.
-    pub fn assign_delegate(env: Env, admin: Address, delegate: Address) -> Result<(), ContractError> {
+    pub fn assign_delegate(
+        env: Env,
+        admin: Address,
+        delegate: Address,
+    ) -> Result<(), ContractError> {
         _require_not_destroyed(&env);
         crate::auth::_require_not_frozen(&env);
         admin.require_auth();
@@ -2835,7 +3185,10 @@ impl PriceOracle {
 
         env.events().publish(
             (Symbol::new(&env, "delegate_assigned_event"),),
-            (admin.clone().into_val(&env), delegate.clone().into_val(&env)),
+            (
+                admin.clone().into_val(&env),
+                delegate.clone().into_val(&env),
+            ),
         );
 
         Ok(())
@@ -2851,7 +3204,10 @@ impl PriceOracle {
             crate::auth::_remove_delegate(&env, &admin);
             env.events().publish(
                 (Symbol::new(&env, "delegate_revoked_event"),),
-                (admin.clone().into_val(&env), delegate.clone().into_val(&env)),
+                (
+                    admin.clone().into_val(&env),
+                    delegate.clone().into_val(&env),
+                ),
             );
         }
 
@@ -2906,11 +3262,7 @@ impl PriceOracle {
 
         // Quorum floor check (issue #292): total votes cast must meet the configured minimum.
         let total_votes = crate::auth::_get_action_votes(&env, action_id).len();
-        let min_quorum = env
-            .storage()
-            .persistent()
-            .get::<DataKey, u32>(&DataKey::MinQuorumThreshold)
-            .unwrap_or(1);
+        let min_quorum = Self::get_min_quorum_threshold(env.clone());
         if total_votes < min_quorum {
             return Err(ContractError::QuorumNotReached);
         }
@@ -3218,7 +3570,12 @@ impl PriceOracle {
     ///
     /// Requires 2 distinct authorized admins. When `status` is `true`, every
     /// public rate read panics with `ContractError::EmergencyHalted` until lifted.
-    pub fn set_emergency_halt(env: Env, admin1: Address, admin2: Address, status: bool) -> Result<(), ContractError> {
+    pub fn set_emergency_halt(
+        env: Env,
+        admin1: Address,
+        admin2: Address,
+        status: bool,
+    ) -> Result<(), ContractError> {
         _require_not_destroyed(&env);
         if admin1 == admin2 {
             return Err(ContractError::MultiSigValidationFailed);
@@ -3237,13 +3594,18 @@ impl PriceOracle {
             Self::_perform_graceful_recovery(&env);
         }
 
+        // Publish structured event for emergency halt toggles so indexers can track it.
+        event_topics::publish_emergency_halt(&env, admin1, admin2, status);
+
         Ok(())
     }
 
     /// Internal routine to clear stale metrics when resuming from a halt.
     fn _perform_graceful_recovery(env: &Env) {
         // 1. Reset baseline ledger to mark the "new beginning" of the system.
-        env.storage().instance().set(&DataKey::BaselineLedger, &env.ledger().sequence());
+        env.storage()
+            .instance()
+            .set(&DataKey::BaselineLedger, &env.ledger().sequence());
 
         // 2. Clear RecentEvents activity feed to remove stale pre-halt logs.
         env.storage().temporary().remove(&DataKey::RecentEvents);
@@ -3254,11 +3616,18 @@ impl PriceOracle {
         let relayers = crate::auth::_get_active_relayers(env);
         for relayer in relayers.iter() {
             // Reset consecutive missed blocks.
-            env.storage().persistent().remove(&DataKey::ProviderConsecutiveMissedBlocks(relayer.clone()));
+            env.storage()
+                .persistent()
+                .remove(&DataKey::ProviderConsecutiveMissedBlocks(relayer.clone()));
             // Reset uptime streak start (they must earn a new 48h streak).
-            env.storage().persistent().remove(&DataKey::ProviderUptimeStreakStart(relayer.clone()));
+            env.storage()
+                .persistent()
+                .remove(&DataKey::ProviderUptimeStreakStart(relayer.clone()));
             // Update last seen to current ledger so they aren't flagged as inactive immediately.
-            env.storage().persistent().set(&DataKey::ProviderLastSeenLedger(relayer.clone()), &env.ledger().sequence());
+            env.storage().persistent().set(
+                &DataKey::ProviderLastSeenLedger(relayer.clone()),
+                &env.ledger().sequence(),
+            );
         }
 
         // 4. Clear TWAPs for all tracked assets.
@@ -3309,10 +3678,10 @@ impl PriceOracle {
 
         let mut sum: i128 = 0;
         for (_, price) in twap_buffer.iter() {
-            sum += price;
+            sum = sum.checked_add(price)?;
         }
 
-        Some(sum / (len as i128))
+        sum.checked_div(len as i128)
     }
 
     /// Subscribe a contract to receive price update callbacks.
@@ -3326,7 +3695,10 @@ impl PriceOracle {
     ///
     /// # Returns
     /// Returns an error if the contract is already subscribed.
-    pub fn subscribe_to_price_updates(env: Env, callback_contract: Address) -> Result<(), ContractError> {
+    pub fn subscribe_to_price_updates(
+        env: Env,
+        callback_contract: Address,
+    ) -> Result<(), ContractError> {
         callbacks::subscribe(&env, callback_contract)
     }
 
@@ -3374,7 +3746,10 @@ impl PriceOracle {
             Some(format!("expiry: {}", expiry)),
         );
 
-        env.events().publish((Symbol::new(&env, "bypass_enabled_event"),), (admin, expiry));
+        env.events().publish(
+            (Symbol::new(&env, "bypass_enabled_event"),),
+            (admin, expiry),
+        );
 
         Ok(expiry)
     }
@@ -3389,7 +3764,8 @@ impl PriceOracle {
 
         _log_admin_action(&env, &admin, AdminAction::DisableBypassSafetyChecks, None);
 
-        env.events().publish((Symbol::new(&env, "bypass_disabled_event"),), (admin,));
+        env.events()
+            .publish((Symbol::new(&env, "bypass_disabled_event"),), (admin,));
 
         Ok(())
     }
@@ -3416,9 +3792,7 @@ impl PriceOracle {
         admin.require_auth();
         crate::auth::_require_authorized(&env, &admin);
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::SlashToken, &token);
+        env.storage().persistent().set(&DataKey::SlashToken, &token);
 
         _log_admin_action(
             &env,
@@ -3442,7 +3816,11 @@ impl PriceOracle {
     ///
     /// Slashed funds are transferred to this address. Must be set by an
     /// authorized admin before any slash can be executed.
-    pub fn set_insurance_reserve(env: Env, admin: Address, reserve: Address) -> Result<(), ContractError> {
+    pub fn set_insurance_reserve(
+        env: Env,
+        admin: Address,
+        reserve: Address,
+    ) -> Result<(), ContractError> {
         _require_not_destroyed(&env);
         _require_initialized(&env);
         crate::auth::_require_not_frozen(&env);
@@ -3489,14 +3867,10 @@ impl PriceOracle {
         admin.require_auth();
         crate::auth::_require_authorized(&env, &admin);
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::GasTank, &gas_tank);
+        env.storage().persistent().set(&DataKey::GasTank, &gas_tank);
 
-        env.events().publish(
-            (Symbol::new(&env, "gas_tank_set"),),
-            (admin, gas_tank),
-        );
+        env.events()
+            .publish((Symbol::new(&env, "gas_tank_set"),), (admin, gas_tank));
 
         Ok(())
     }
@@ -3718,11 +4092,11 @@ impl PriceOracle {
 mod asset_symbol;
 mod auth;
 mod callbacks;
+#[cfg(test)]
+mod delegate_tests;
 pub mod math;
 mod median;
 mod role_registry;
 mod slashing;
 mod test;
-#[cfg(test)]
-mod delegate_tests;
 mod types;

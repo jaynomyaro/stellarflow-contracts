@@ -60,9 +60,10 @@ pub fn get_consecutive_missed_blocks(env: &Env, relayer: &Address) -> u32 {
 
 /// Overwrite the missed-block counter for a relayer.
 fn set_consecutive_missed_blocks(env: &Env, relayer: &Address, count: u32) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::ProviderConsecutiveMissedBlocks(relayer.clone()), &count);
+    env.storage().persistent().set(
+        &DataKey::ProviderConsecutiveMissedBlocks(relayer.clone()),
+        &count,
+    );
 }
 
 /// Remove the missed-block counter for a relayer.
@@ -105,7 +106,9 @@ fn calculate_exponential_multiplier(count: u32) -> Result<i128, Error> {
     if exponent >= 126 {
         return Ok(i128::MAX);
     }
-    Ok(1_i128.checked_shl(exponent).ok_or(Error::InvalidInfractionCount)?)
+    Ok(1_i128
+        .checked_shl(exponent)
+        .ok_or(Error::InvalidInfractionCount)?)
 }
 
 /// Get the effective slashing multiplier for the relayer.
@@ -293,7 +296,15 @@ pub fn execute_slash_internal(
     }
 
     // ── Emit event ───────────────────────────────────────────────────────────
-    env.events().publish((Symbol::new(env, "slash_executed_event"),), (bad_relayer.clone(), amount, reserve.clone(), executor.clone()));
+    env.events().publish(
+        (Symbol::new(env, "slash_executed_event"),),
+        (
+            bad_relayer.clone(),
+            amount,
+            reserve.clone(),
+            executor.clone(),
+        ),
+    );
 
     // Also publish a plain tuple event for off-chain indexers that don't parse
     // the typed event schema.
@@ -309,6 +320,135 @@ pub fn execute_slash_internal(
     );
 
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Deviation-based tiered slashing
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Classification of a price submission's deviation from the consensus median.
+///
+/// Tiers are expressed in basis points (bps), where 100 bps = 1 %.
+/// The `Noise` tier (< 50 bps) represents normal network variance and carries
+/// no penalty.  Higher tiers indicate increasingly intentional manipulation and
+/// attract proportionally larger slash multipliers.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DeviationTier {
+    /// < 50 bps — network noise or minor communication delay.  No penalty.
+    Noise,
+    /// 50 – 199 bps — minor deviation.  1× base multiplier.
+    Minor,
+    /// 200 – 499 bps — moderate deviation.  3× base multiplier.
+    Moderate,
+    /// 500 – 999 bps — significant deviation.  7× base multiplier.
+    Significant,
+    /// ≥ 1 000 bps — extreme deviation consistent with price manipulation.  15× base multiplier.
+    Manipulation,
+}
+
+/// Map a raw deviation in basis points to the corresponding [`DeviationTier`].
+pub fn classify_deviation(deviation_bps: u32) -> DeviationTier {
+    if deviation_bps < 50 {
+        DeviationTier::Noise
+    } else if deviation_bps < 200 {
+        DeviationTier::Minor
+    } else if deviation_bps < 500 {
+        DeviationTier::Moderate
+    } else if deviation_bps < 1_000 {
+        DeviationTier::Significant
+    } else {
+        DeviationTier::Manipulation
+    }
+}
+
+/// Return the slash multiplier associated with a [`DeviationTier`].
+///
+/// A multiplier of `0` means no slash is applied (Noise tier).
+/// The multiplier is applied on top of the relayer's existing missed-block
+/// multiplier inside [`report_price_deviation`], so the total penalty grows
+/// proportionally with *both* the severity of the deviation *and* the
+/// relayer's prior infraction history.
+pub fn deviation_multiplier(tier: DeviationTier) -> i128 {
+    match tier {
+        DeviationTier::Noise => 0,
+        DeviationTier::Minor => 1,
+        DeviationTier::Moderate => 3,
+        DeviationTier::Significant => 7,
+        DeviationTier::Manipulation => 15,
+    }
+}
+
+/// Evaluate a relayer's price submission against the finalized consensus median
+/// and apply a proportional slash when the deviation crosses a meaningful threshold.
+///
+/// This function distinguishes accidental network hiccups (< 50 bps) from
+/// deliberate price manipulation (≥ 1 000 bps), applying a larger penalty the
+/// further the submitted price strays from the consensus.
+///
+/// # Penalty model
+/// ```text
+/// final_penalty = base_slash_amount × tier_multiplier × missed_blocks_multiplier
+/// ```
+/// where `tier_multiplier` comes from [`deviation_multiplier`] and
+/// `missed_blocks_multiplier` is the exponential penalty already accumulated
+/// from the relayer's downtime history (see [`execute_slash_internal`]).
+///
+/// # Parameters
+/// - `executor`: the admin address triggering this evaluation.
+/// - `relayer`: the provider whose submission is under review.
+/// - `submitted_price`: price the relayer submitted, normalized to 9 decimals.
+/// - `consensus_price`: finalized median price at the same precision.
+/// - `base_slash_amount`: base token amount to slash before tier scaling.
+///
+/// # Returns
+/// The tier-scaled amount passed to the slash engine (`0` for the Noise tier),
+/// or an error.  The actual token deducted from the relayer's stake is
+/// `base_slash_amount × tier_multiplier × missed_blocks_multiplier`.
+pub fn report_price_deviation(
+    env: &Env,
+    executor: &Address,
+    relayer: &Address,
+    submitted_price: i128,
+    consensus_price: i128,
+    base_slash_amount: i128,
+) -> Result<i128, Error> {
+    let deviation_bps =
+        crate::math::calculate_deviation_bps(submitted_price, consensus_price)?;
+    let tier = classify_deviation(deviation_bps);
+    let tier_mult = deviation_multiplier(tier);
+
+    // Persist for audit and off-chain indexing regardless of tier.
+    env.storage()
+        .persistent()
+        .set(&DataKey::ProviderLastDeviationBps(relayer.clone()), &deviation_bps);
+
+    // Noise tier — record only, no slash.
+    if tier_mult == 0 {
+        return Ok(0);
+    }
+
+    // Scale the base amount by the tier multiplier.
+    // execute_slash_internal will then further multiply by the missed-blocks
+    // multiplier, yielding: final = base × tier_mult × missed_blocks_mult.
+    let tier_scaled = base_slash_amount
+        .checked_mul(tier_mult)
+        .ok_or(Error::InvalidSlashAmount)?;
+
+    execute_slash_internal(env, executor, relayer, tier_scaled)?;
+
+    env.events().publish(
+        (Symbol::new(env, "deviation_slash"),),
+        (
+            relayer.clone(),
+            submitted_price,
+            consensus_price,
+            deviation_bps,
+            tier_mult,
+            tier_scaled,
+        ),
+    );
+
+    Ok(tier_scaled)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -417,5 +557,86 @@ mod slashing_tests {
         assert_eq!(get_consecutive_missed_blocks(&env, &relayer), 0);
         assert_eq!(get_uptime_streak_start(&env, &relayer), None);
         assert_eq!(get_slash_multiplier(&env, &relayer).unwrap(), 1);
+    }
+
+    // ── classify_deviation ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_classify_deviation_noise() {
+        assert_eq!(classify_deviation(0), DeviationTier::Noise);
+        assert_eq!(classify_deviation(49), DeviationTier::Noise);
+    }
+
+    #[test]
+    fn test_classify_deviation_minor() {
+        assert_eq!(classify_deviation(50), DeviationTier::Minor);
+        assert_eq!(classify_deviation(199), DeviationTier::Minor);
+    }
+
+    #[test]
+    fn test_classify_deviation_moderate() {
+        assert_eq!(classify_deviation(200), DeviationTier::Moderate);
+        assert_eq!(classify_deviation(499), DeviationTier::Moderate);
+    }
+
+    #[test]
+    fn test_classify_deviation_significant() {
+        assert_eq!(classify_deviation(500), DeviationTier::Significant);
+        assert_eq!(classify_deviation(999), DeviationTier::Significant);
+    }
+
+    #[test]
+    fn test_classify_deviation_manipulation() {
+        assert_eq!(classify_deviation(1_000), DeviationTier::Manipulation);
+        assert_eq!(classify_deviation(u32::MAX), DeviationTier::Manipulation);
+    }
+
+    // ── deviation_multiplier ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_deviation_multiplier_noise_is_zero() {
+        assert_eq!(deviation_multiplier(DeviationTier::Noise), 0);
+    }
+
+    #[test]
+    fn test_deviation_multiplier_tiers() {
+        assert_eq!(deviation_multiplier(DeviationTier::Minor), 1);
+        assert_eq!(deviation_multiplier(DeviationTier::Moderate), 3);
+        assert_eq!(deviation_multiplier(DeviationTier::Significant), 7);
+        assert_eq!(deviation_multiplier(DeviationTier::Manipulation), 15);
+    }
+
+    // ── calculate_deviation_bps (via math module) ─────────────────────────────
+
+    #[test]
+    fn test_deviation_bps_identical_prices() {
+        assert_eq!(crate::math::calculate_deviation_bps(10_000, 10_000), Ok(0));
+    }
+
+    #[test]
+    fn test_deviation_bps_one_percent() {
+        // submitted is 1 % above consensus → 100 bps
+        assert_eq!(crate::math::calculate_deviation_bps(10_100, 10_000), Ok(100));
+    }
+
+    #[test]
+    fn test_deviation_bps_below_consensus() {
+        // submitted is 2 % below consensus → 200 bps
+        assert_eq!(crate::math::calculate_deviation_bps(9_800, 10_000), Ok(200));
+    }
+
+    #[test]
+    fn test_deviation_bps_zero_consensus_returns_error() {
+        assert_eq!(
+            crate::math::calculate_deviation_bps(500, 0),
+            Err(crate::Error::DeviationConsensusZero)
+        );
+    }
+
+    #[test]
+    fn test_deviation_bps_extreme_submitted_saturates() {
+        // i128::MAX submitted vs consensus 1 — overflows internally, saturates to u32::MAX
+        let result = crate::math::calculate_deviation_bps(i128::MAX, 1);
+        assert_eq!(result, Ok(u32::MAX));
     }
 }

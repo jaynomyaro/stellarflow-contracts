@@ -5,6 +5,8 @@ use soroban_sdk::{contracterror, Vec};
 #[repr(u32)]
 pub enum MedianError {
     EmptyInput = 10,
+    /// Arithmetic operation overflow detected.
+    ArithmeticOverflow = 11,
 }
 
 /// Sort a Vec<i128> using insertion sort (no_std compatible).
@@ -45,7 +47,8 @@ pub fn calculate_median(mut prices: Vec<i128>) -> Result<i128, MedianError> {
     } else {
         let lo = prices.get(mid - 1).unwrap();
         let hi = prices.get(mid).unwrap();
-        Ok((lo + hi) / 2)
+        let sum = lo.checked_add(hi).ok_or(MedianError::ArithmeticOverflow)?;
+        Ok(sum.checked_div(2).ok_or(MedianError::ArithmeticOverflow)?)
     }
 }
 

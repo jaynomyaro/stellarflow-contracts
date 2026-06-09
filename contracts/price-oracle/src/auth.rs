@@ -112,7 +112,9 @@ pub fn _renounce_ownership(env: &Env) {
 pub fn _set_delegate(env: &Env, admin: &Address, delegate: &Address) {
     // Remove old delegate reverse-mapping if this admin already had one
     if let Some(old_delegate) = _get_delegate(env, admin) {
-        env.storage().instance().remove(&DataKey::DelegateOf(old_delegate));
+        env.storage()
+            .instance()
+            .remove(&DataKey::DelegateOf(old_delegate));
     }
 
     env.storage()
@@ -140,7 +142,9 @@ pub fn _get_admin_for_delegate(env: &Env, delegate: &Address) -> Option<Address>
 /// Revoke a hot-wallet delegate from an admin.
 pub fn _remove_delegate(env: &Env, admin: &Address) {
     if let Some(delegate) = _get_delegate(env, admin) {
-        env.storage().instance().remove(&DataKey::DelegateOf(delegate));
+        env.storage()
+            .instance()
+            .remove(&DataKey::DelegateOf(delegate));
         env.storage()
             .instance()
             .remove(&DataKey::SubmissionDelegate(admin.clone()));
@@ -201,10 +205,12 @@ pub fn _remove_provider(env: &Env, provider: &Address) {
 /// Returns `true` if the address is a whitelisted provider OR an authorized delegate.
 pub fn _is_provider(env: &Env, addr: &Address) -> bool {
     // 1. Direct provider whitelist check
-    if env.storage()
+    if env
+        .storage()
         .instance()
         .get::<DataKey, bool>(&DataKey::Provider(addr.clone()))
-        .unwrap_or(false) {
+        .unwrap_or(false)
+    {
         return true;
     }
 

@@ -1,4 +1,4 @@
-use soroban_sdk::{Env, Symbol, symbol_short, IntoVal};
+use soroban_sdk::{Bytes, Env, Symbol, symbol_short, IntoVal};
 use soroban_sdk::testutils::{Address as _, Ledger, LedgerInfo};
 use crate::{
     ContractError, TimeLockedUpgradeContract, TimeLockedUpgradeContractClient,
@@ -20,6 +20,12 @@ fn advance_ledger_timestamp(env: &Env, delta: u64) {
     });
 }
 
+fn nonce_proof(env: &Env, nonce: u64, salt_seed: &[u8]) -> (Bytes, soroban_sdk::BytesN<32>) {
+    let salt = Bytes::from_slice(env, salt_seed);
+    let signature = crate::nonce::derive_salt_signature(env, nonce, salt.clone());
+    (salt, signature)
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // Existing tests
 // ═════════════════════════════════════════════════════════════════════════════
@@ -39,9 +45,11 @@ fn test_initialize_and_basic_functionality() {
     assert_eq!(data.admin, admin);
     assert_eq!(data.value, 0);
 
-    client.set_value(&42, &admin, &0, &u64::MAX);
+    let (salt, signature) = nonce_proof(&env, 0, b"set-value-0");
+    client.set_value(&42, &admin, &0, &salt, &signature, &u64::MAX);
     let data = client.get_data();
     assert_eq!(data.value, 42);
+    assert_eq!(client.get_coordinator_nonce(&admin), 1);
 }
 
 #[test]
@@ -55,8 +63,9 @@ fn test_propose_upgrade() {
     client.initialize(&admin);
 
     let new_wasm_hash = soroban_sdk::BytesN::from_array(&env, &[1u8; 32]);
+    let (salt, signature) = nonce_proof(&env, 0, b"propose-upgrade-0");
 
-    client.propose_upgrade(&new_wasm_hash, &admin, &0, &u64::MAX);
+    client.propose_upgrade(&new_wasm_hash, &admin, &0, &salt, &signature, &u64::MAX);
 
     let pending = client.get_pending_upgrade();
     assert!(pending.is_some());
@@ -64,10 +73,28 @@ fn test_propose_upgrade() {
     let pending_upgrade = pending.unwrap();
     assert_eq!(pending_upgrade.new_wasm_hash, new_wasm_hash);
     assert_eq!(pending_upgrade.proposer, admin);
+    assert_eq!(client.get_coordinator_nonce(&admin), 1);
 
     let remaining = client.get_upgrade_timelock_remaining();
     assert!(remaining.is_some());
     assert_eq!(remaining.unwrap(), UPGRADE_DELAY_SECONDS);
+}
+
+#[test]
+#[should_panic(expected = "Invalid salt signature")]
+fn test_set_value_rejects_bad_salt_signature() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, TimeLockedUpgradeContract);
+    let client = TimeLockedUpgradeContractClient::new(&env, &contract_id);
+
+    let admin = soroban_sdk::Address::generate(&env);
+    client.initialize(&admin);
+
+    let salt = Bytes::from_slice(&env, b"bad-salt");
+    let bad_signature = soroban_sdk::BytesN::from_array(&env, &[9u8; 32]);
+
+    client.set_value(&42, &admin, &0, &salt, &bad_signature, &u64::MAX);
 }
 
 #[test]
@@ -81,8 +108,9 @@ fn test_execute_upgrade_after_timelock() {
     client.initialize(&admin);
 
     let new_wasm_hash = soroban_sdk::BytesN::from_array(&env, &[1u8; 32]);
+    let (salt, signature) = nonce_proof(&env, 0, b"propose-upgrade-1");
 
-    client.propose_upgrade(&new_wasm_hash, &admin, &0, &u64::MAX);
+    client.propose_upgrade(&new_wasm_hash, &admin, &0, &salt, &signature, &u64::MAX);
 
     // Fast forward time by 48 hours
     advance_ledger_timestamp(&env, UPGRADE_DELAY_SECONDS);
@@ -104,7 +132,8 @@ fn test_cancel_upgrade() {
 
     let new_wasm_hash = soroban_sdk::BytesN::from_array(&env, &[1u8; 32]);
 
-    client.propose_upgrade(&new_wasm_hash, &admin, &0, &u64::MAX);
+    let (salt, signature) = nonce_proof(&env, 0, b"propose-upgrade-2");
+    client.propose_upgrade(&new_wasm_hash, &admin, &0, &salt, &signature, &u64::MAX);
     assert!(client.get_pending_upgrade().is_some());
 
     client.cancel_upgrade(&admin);
@@ -125,7 +154,8 @@ fn test_timelock_countdown() {
 
     let new_wasm_hash = soroban_sdk::BytesN::from_array(&env, &[1u8; 32]);
 
-    client.propose_upgrade(&new_wasm_hash, &admin, &0, &u64::MAX);
+    let (salt, signature) = nonce_proof(&env, 0, b"propose-upgrade-3");
+    client.propose_upgrade(&new_wasm_hash, &admin, &0, &salt, &signature, &u64::MAX);
 
     let remaining = client.get_upgrade_timelock_remaining().unwrap();
     assert_eq!(remaining, UPGRADE_DELAY_SECONDS);
@@ -453,7 +483,8 @@ fn test_set_value_updates_heartbeat() {
     assert!(!client.is_data_fresh(&value_asset));
 
     // Call set_value — should auto-record heartbeat
-    client.set_value(&42, &admin, &0, &u64::MAX);
+    let (salt, signature) = nonce_proof(&env, 0, b"set-value-1");
+    client.set_value(&42, &admin, &0, &salt, &signature, &u64::MAX);
 
     // Now the "VALUE" asset should have a fresh heartbeat
     assert!(client.is_data_fresh(&value_asset));
@@ -464,7 +495,8 @@ fn test_set_value_updates_heartbeat() {
     assert!(!client.is_data_fresh(&value_asset));
 
     // Another set_value call refreshes the heartbeat
-    client.set_value(&100, &admin, &1, &u64::MAX);
+    let (salt, signature) = nonce_proof(&env, 1, b"set-value-2");
+    client.set_value(&100, &admin, &1, &salt, &signature, &u64::MAX);
     assert!(client.is_data_fresh(&value_asset));
 }
 
@@ -493,7 +525,8 @@ fn test_unauthorized_set_value_returns_typed_error() {
     let unauthorized = soroban_sdk::Address::generate(&env);
     client.initialize(&admin);
 
-    let result = client.try_set_value(&42, &unauthorized, &0u64, &u64::MAX);
+    let (salt, signature) = nonce_proof(&env, 0, b"set-value-unauth");
+    let result = client.try_set_value(&42, &unauthorized, &0u64, &salt, &signature, &u64::MAX);
     assert_eq!(result, Err(Ok(ContractError::NotAdmin)));
 }
 
@@ -526,9 +559,11 @@ fn test_expired_signature_rejected() {
     let expired_at: u64 = 500; // already in the past
 
     let new_wasm_hash = soroban_sdk::BytesN::from_array(&env, &[1u8; 32]);
-    let result = client.try_propose_upgrade(&new_wasm_hash, &admin, &0, &expired_at);
+    let (salt, signature) = nonce_proof(&env, 0, b"propose-upgrade-expired");
+    let result = client.try_propose_upgrade(&new_wasm_hash, &admin, &0, &salt, &signature, &expired_at);
     assert_eq!(result, Err(Ok(ContractError::SignatureExpired)));
 
-    let result = client.try_set_value(&42, &admin, &0, &expired_at);
+    let (salt2, signature2) = nonce_proof(&env, 0, b"set-value-expired");
+    let result = client.try_set_value(&42, &admin, &0, &salt2, &signature2, &expired_at);
     assert_eq!(result, Err(Ok(ContractError::SignatureExpired)));
 }

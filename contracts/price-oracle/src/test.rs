@@ -19,7 +19,10 @@ pub struct DummyToken;
 impl DummyToken {
     pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
         from.require_auth();
-        env.events().publish((Symbol::new(&env, "token_transfer_event"),), (from, to, amount));
+        env.events().publish(
+            (Symbol::new(&env, "token_transfer_event"),),
+            (from, to, amount),
+        );
     }
 }
 
@@ -254,6 +257,56 @@ fn test_set_and_get_max_deviation_percentage() {
 }
 
 #[test]
+fn test_set_max_deviation_percentage_rejects_values_below_floor() {
+    let (env, contract_id, client) = setup();
+    let admin = Address::generate(&env);
+
+    set_admin(&env, &contract_id, &admin);
+
+    let result = client.try_set_max_deviation_percentage(&admin, &50_i128);
+    match result {
+        Err(Ok(e)) => assert_eq!(e, Error::InvalidMaxDeviation),
+        other => panic!("expected InvalidMaxDeviation, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_get_max_deviation_percentage_clamps_legacy_low_storage() {
+    let (env, contract_id, client) = setup();
+
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::MaxPriceDeviationBps, &50_i128);
+    });
+
+    assert_eq!(client.get_max_deviation_percentage(), 100_i128);
+}
+
+#[test]
+fn test_rollback_max_deviation_rejects_values_below_floor() {
+    let (env, contract_id, client) = setup();
+    let admin = Address::generate(&env);
+
+    set_admin(&env, &contract_id, &admin);
+    client.set_max_deviation_percentage(&admin, &500_i128);
+
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::PrevMaxDeviationBps, &50_i128);
+    });
+
+    let result = client.try_rollback_max_deviation_pct(&admin);
+    match result {
+        Err(Ok(e)) => assert_eq!(e, Error::InvalidMaxDeviation),
+        other => panic!("expected InvalidMaxDeviation, got {:?}", other),
+    }
+
+    assert_eq!(client.get_max_deviation_percentage(), 500_i128);
+}
+
+#[test]
 fn test_update_price_rejects_configured_max_deviation() {
     let (env, contract_id, client) = setup();
     let admin = Address::generate(&env);
@@ -274,6 +327,33 @@ fn test_update_price_rejects_configured_max_deviation() {
 }
 
 #[test]
+fn test_set_min_quorum_threshold_rejects_values_below_floor() {
+    let (env, contract_id, client) = setup();
+    let admin = Address::generate(&env);
+
+    set_admin(&env, &contract_id, &admin);
+
+    let result = client.try_set_min_quorum_threshold(&admin, &1u32);
+    match result {
+        Err(Ok(e)) => assert_eq!(e, Error::MultiSigValidationFailed),
+        other => panic!("expected MultiSigValidationFailed, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_get_min_quorum_threshold_clamps_legacy_low_storage() {
+    let (env, contract_id, client) = setup();
+
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::MinQuorumThreshold, &1u32);
+    });
+
+    assert_eq!(client.get_min_quorum_threshold(), 2u32);
+}
+
+#[test]
 fn test_set_and_get_price_bounds() {
     let (env, contract_id, client) = setup();
     let admin = Address::generate(&env);
@@ -288,12 +368,23 @@ fn test_set_and_get_price_bounds() {
 }
 
 #[test]
+fn test_set_price_bounds_emits_indexable_price_bounds_event() {
 fn test_register_assets_with_config_applies_all_config_atomically() {
     let (env, contract_id, client) = setup();
     let admin = Address::generate(&env);
     let asset = symbol_short!("NGN");
 
     set_admin(&env, &contract_id, &admin);
+    client.set_price_bounds(&admin, &asset, &500_i128, &2_000_i128);
+
+    let events = env.events().all();
+    let debug_str = alloc::format!("{:?}", events);
+    assert!(debug_str.contains("price_bounds_set"));
+    assert!(debug_str.contains("NGN"));
+}
+
+#[test]
+fn test_set_price_floor_emits_indexable_price_floor_event() {
 
     let config = AssetRegistrationConfig {
         asset: asset.clone(),
@@ -332,6 +423,12 @@ fn test_register_assets_with_config_rolls_back_on_invalid_config() {
     let asset = symbol_short!("NGN");
 
     set_admin(&env, &contract_id, &admin);
+    client.set_price_floor(&admin, &asset, &700_i128);
+
+    let events = env.events().all();
+    let debug_str = alloc::format!("{:?}", events);
+    assert!(debug_str.contains("price_floor_set"));
+    assert!(debug_str.contains("NGN"));
 
     let bad_config = AssetRegistrationConfig {
         asset: asset.clone(),
@@ -550,6 +647,37 @@ fn test_update_price_emits_event() {
     let events = env.events().all();
     let debug_str = alloc::format!("{:?}", events);
     assert!(debug_str.contains("price_updated_event"));
+    assert!(debug_str.contains("price_update"));
+}
+
+#[test]
+fn test_update_price_emits_indexable_price_update_topic() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+
+    let admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let provider = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let asset = symbol_short!("NGN");
+    let price: i128 = 1_500_000;
+
+    env.as_contract(&contract_id, || {
+        crate::auth::_set_admin(&env, &soroban_sdk::vec![&env, admin.clone()]);
+        crate::auth::_add_provider(&env, &provider);
+    });
+
+    client.add_asset(&admin, &asset);
+
+    env.ledger().set_timestamp(1_700_000_000);
+    env.ledger().set_sequence_number(1);
+    client.update_price(&provider, &asset, &price, &6u32, &100u32, &3600u64);
+
+    let events = env.events().all();
+    let debug_str = alloc::format!("{:?}", events);
+    assert!(debug_str.contains("price_update"));
+    assert!(debug_str.contains("NGN"));
 }
 
 #[test]
@@ -2471,6 +2599,294 @@ fn test_self_destruct_emits_event() {
         crate::auth::_add_authorized(&env, &admin2);
     });
 
+    // Destroy the contract
+    client.self_destruct(&admin1, &admin2);
+
+    // Any admin-only function should now fail with ContractDestroyed
+    let dummy_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+    client.upgrade(&admin1, &dummy_hash);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Issue #369: Ledger-Sync | Enforcing Absolute Chronological Gaps Tests
+// ────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_ledger_gap_new_provider_allowed() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let asset = symbol_short!("NGN");
+
+    env.ledger().set_timestamp(1_000_000);
+    env.ledger().set_sequence(100);
+
+    client.init_admin(&admin);
+    client.add_asset(&admin, &asset).unwrap();
+
+    env.as_contract(&contract_id, || {
+        crate::auth::_add_provider(&env, &provider);
+    });
+
+    // First submission from a new provider should succeed (no ledger gap restriction)
+    let result = client.try_update_price(&provider, &asset, &100_000_000, &9, &95, &3600);
+    assert!(result.is_ok(), "New provider should be allowed to submit without ledger gap restriction");
+}
+
+#[test]
+fn test_ledger_gap_insufficient_gap_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let asset = symbol_short!("KES");
+
+    env.ledger().set_timestamp(1_000_000);
+    env.ledger().set_sequence(100);
+
+    client.init_admin(&admin);
+    client.add_asset(&admin, &asset).unwrap();
+
+    env.as_contract(&contract_id, || {
+        crate::auth::_add_provider(&env, &provider);
+    });
+
+    // First submission at ledger 100
+    let result1 = client.try_update_price(&provider, &asset, &100_000_000, &9, &95, &3600);
+    assert!(result1.is_ok(), "First submission should succeed");
+
+    // Try to submit again at ledger 102 (gap of 2 blocks, less than required 3)
+    env.ledger().set_sequence(102);
+    env.ledger().set_timestamp(1_000_100);
+
+    let result2 = client.try_update_price(&provider, &asset, &105_000_000, &9, &95, &3600);
+    match result2 {
+        Err(Ok(ContractError::LedgerGapTooSmall)) => {
+            // Expected!
+        }
+        other => panic!(
+            "Expected LedgerGapTooSmall error for insufficient gap, got: {:?}",
+            other
+        ),
+    }
+}
+
+#[test]
+fn test_ledger_gap_exactly_3_blocks_allowed() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let asset = symbol_short!("GHS");
+
+    env.ledger().set_timestamp(1_000_000);
+    env.ledger().set_sequence(100);
+
+    client.init_admin(&admin);
+    client.add_asset(&admin, &asset).unwrap();
+
+    env.as_contract(&contract_id, || {
+        crate::auth::_add_provider(&env, &provider);
+    });
+
+    // First submission at ledger 100
+    let result1 = client.try_update_price(&provider, &asset, &50_000_000, &9, &95, &3600);
+    assert!(result1.is_ok(), "First submission should succeed");
+
+    // Submit again at ledger 103 (gap of exactly 3 blocks)
+    env.ledger().set_sequence(103);
+    env.ledger().set_timestamp(1_000_100);
+
+    let result2 = client.try_update_price(&provider, &asset, &51_000_000, &9, &95, &3600);
+    assert!(
+        result2.is_ok(),
+        "Submission after exactly 3-block gap should succeed"
+    );
+}
+
+#[test]
+fn test_ledger_gap_more_than_3_blocks_allowed() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let asset = symbol_short!("CFA");
+
+    env.ledger().set_timestamp(1_000_000);
+    env.ledger().set_sequence(100);
+
+    client.init_admin(&admin);
+    client.add_asset(&admin, &asset).unwrap();
+
+    env.as_contract(&contract_id, || {
+        crate::auth::_add_provider(&env, &provider);
+    });
+
+    // First submission at ledger 100
+    let result1 = client.try_update_price(&provider, &asset, &75_000_000, &9, &95, &3600);
+    assert!(result1.is_ok(), "First submission should succeed");
+
+    // Submit again at ledger 150 (gap of 50 blocks, well above minimum)
+    env.ledger().set_sequence(150);
+    env.ledger().set_timestamp(1_001_000);
+
+    let result2 = client.try_update_price(&provider, &asset, &76_000_000, &9, &95, &3600);
+    assert!(
+        result2.is_ok(),
+        "Submission after 50-block gap should succeed"
+    );
+}
+
+#[test]
+fn test_ledger_gap_multiple_providers_independent() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let provider_a = Address::generate(&env);
+    let provider_b = Address::generate(&env);
+    let asset = symbol_short!("NGN");
+
+    env.ledger().set_timestamp(1_000_000);
+    env.ledger().set_sequence(100);
+
+    client.init_admin(&admin);
+    client.add_asset(&admin, &asset).unwrap();
+
+    env.as_contract(&contract_id, || {
+        crate::auth::_add_provider(&env, &provider_a);
+        crate::auth::_add_provider(&env, &provider_b);
+    });
+
+    // Provider A submits at ledger 100
+    let result_a1 = client.try_update_price(&provider_a, &asset, &100_000_000, &9, &95, &3600);
+    assert!(result_a1.is_ok(), "Provider A first submission should succeed");
+
+    // Provider B submits at ledger 101 (new provider, no gap restriction)
+    env.ledger().set_sequence(101);
+    let result_b1 = client.try_update_price(&provider_b, &asset, &102_000_000, &9, &95, &3600);
+    assert!(
+        result_b1.is_ok(),
+        "Provider B first submission should succeed (no gap restriction for new provider)"
+    );
+
+    // Provider A tries to submit at ledger 102 (gap of 2, fails)
+    env.ledger().set_sequence(102);
+    let result_a2 = client.try_update_price(&provider_a, &asset, &101_000_000, &9, &95, &3600);
+    match result_a2 {
+        Err(Ok(ContractError::LedgerGapTooSmall)) => {
+            // Expected!
+        }
+        other => panic!(
+            "Expected LedgerGapTooSmall for Provider A, got: {:?}",
+            other
+        ),
+    }
+
+    // Provider B tries to submit at ledger 103 (gap of 2 for B, fails)
+    env.ledger().set_sequence(103);
+    let result_b2 = client.try_update_price(&provider_b, &asset, &103_000_000, &9, &95, &3600);
+    match result_b2 {
+        Err(Ok(ContractError::LedgerGapTooSmall)) => {
+            // Expected!
+        }
+        other => panic!(
+            "Expected LedgerGapTooSmall for Provider B, got: {:?}",
+            other
+        ),
+    }
+
+    // Provider A submits at ledger 104 (gap of 4 from ledger 100, succeeds)
+    env.ledger().set_sequence(104);
+    let result_a3 = client.try_update_price(&provider_a, &asset, &104_000_000, &9, &95, &3600);
+    assert!(result_a3.is_ok(), "Provider A should succeed after 4-block gap");
+
+    // Provider B submits at ledger 105 (gap of 4 from ledger 101, succeeds)
+    env.ledger().set_sequence(105);
+    let result_b3 = client.try_update_price(&provider_b, &asset, &105_000_000, &9, &95, &3600);
+    assert!(result_b3.is_ok(), "Provider B should succeed after 4-block gap");
+}
+
+#[test]
+fn test_ledger_gap_provider_last_seen_ledger_tracking() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let asset = symbol_short!("KES");
+
+    env.ledger().set_timestamp(1_000_000);
+    env.ledger().set_sequence(100);
+
+    client.init_admin(&admin);
+    client.add_asset(&admin, &asset).unwrap();
+
+    env.as_contract(&contract_id, || {
+        crate::auth::_add_provider(&env, &provider);
+    });
+
+    // Initially, provider has no recorded last ledger
+    let last_ledger_before = client.get_provider_last_seen_ledger(&provider);
+    assert_eq!(last_ledger_before, 0, "New provider should have no recorded last ledger");
+
+    // First submission at ledger 100
+    client.update_price(&provider, &asset, &100_000_000, &9, &95, &3600);
+
+    // Provider's last seen ledger should now be 100
+    let last_ledger_after_first = client.get_provider_last_seen_ledger(&provider);
+    assert_eq!(
+        last_ledger_after_first, 100,
+        "Provider's last seen ledger should be updated to 100"
+    );
+
+    // Submit again at ledger 105
+    env.ledger().set_sequence(105);
+    env.ledger().set_timestamp(1_000_100);
+    client.update_price(&provider, &asset, &105_000_000, &9, &95, &3600);
+
+    // Provider's last seen ledger should now be 105
+    let last_ledger_after_second = client.get_provider_last_seen_ledger(&provider);
+    assert_eq!(
+        last_ledger_after_second, 105,
+        "Provider's last seen ledger should be updated to 105 after second submission"
+    );
+}
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+
+    let admin1 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let admin2 = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+    client.init_admin(&admin1);
+    env.as_contract(&contract_id, || {
+        crate::auth::_add_authorized(&env, &admin2);
+    });
+
     client.self_destruct(&admin1, &admin2);
 
     let events = env.events().all();
@@ -2753,7 +3169,7 @@ fn test_buffer_truncation_with_equal_weights() {
     for _ in 0..13 {
         let provider = Address::generate(&env);
         providers.push_back(provider.clone());
-        
+
         env.as_contract(&contract_id, || {
             crate::auth::_add_provider(&env, &provider);
             crate::auth::_set_provider_weight(&env, &provider, 75u32);
@@ -2774,7 +3190,7 @@ fn test_buffer_truncation_with_equal_weights() {
     // Get the buffer and verify it was truncated to 11
     let buffer = client.get_price_buffer_data(&asset);
     assert!(buffer.is_some(), "Buffer should exist");
-    
+
     let buffer_data = buffer.unwrap();
     assert_eq!(
         buffer_data.entries.len(),
@@ -2803,7 +3219,7 @@ fn test_median_calculation_after_truncation() {
     for i in 0..12 {
         let provider = Address::generate(&env);
         providers.push_back(provider.clone());
-        
+
         env.as_contract(&contract_id, || {
             crate::auth::_add_provider(&env, &provider);
             let weight = if i < 11 { 100u32 } else { 10u32 }; // Last provider has low weight
@@ -2828,7 +3244,7 @@ fn test_median_calculation_after_truncation() {
         price_data.price >= 1_000_000_i128,
         "Median price should be calculated from truncated buffer"
     );
-    
+
     // The low-weight provider (index 11) should have been excluded
     let buffer = client.get_price_buffer_data(&asset).unwrap();
     assert_eq!(buffer.entries.len(), 11, "Buffer should contain 11 entries");
@@ -3081,12 +3497,12 @@ fn test_graceful_recovery_clears_metrics() {
 
     // 1. Populate metrics: Price update (adds to TWAP, RecentEvents, LastSeen)
     client.update_price(&provider, &asset, &1000_i128, &6u32, &100u32, &3600u64);
-    
+
     // Add relayer infraction
     env.as_contract(&contract_id, || {
         crate::slashing::report_missed_blocks(&env, &provider, 5).unwrap();
     });
-    
+
     assert_eq!(client.get_twap(&asset), Some(1000));
     assert_eq!(client.get_last_n_events(&5).len(), 1);
     assert_eq!(client.get_provider_consecutive_missed_blocks(&provider), 5);
